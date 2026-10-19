@@ -1,0 +1,411 @@
+//  mq-bridge-onnx
+//  © Copyright 2026, by Marco Mengelkoch
+//  Licensed under MIT OR Apache-2.0, see LICENSE file for more details
+//  git clone https://github.com/marcomq/mq-bridge-onnx
+
+//! Task `score`: one row of numeric features per message in, the model's outputs out,
+//! e.g. a CatBoost, XGBoost or LightGBM model exported to ONNX.
+
+use std::sync::Arc;
+
+use anyhow::{Context, anyhow, bail};
+use async_trait::async_trait;
+use ort::value::{DynMapValueType, DynValue, Tensor, TensorElementType, ValueType};
+use serde_json::{Map, Value};
+
+use crate::config::ScoreConfig;
+use crate::runtime::{self as onnx, OnnxModel};
+use crate::{float_value, model_name};
+use mq_bridge::CanonicalMessage;
+use mq_bridge::SentBatch;
+use mq_bridge::errors::PublisherError;
+use mq_bridge::support::interpolation::CompiledTemplate;
+use mq_bridge::traits::MessagePublisher;
+
+const DEFAULT_MAX_BATCH: usize = 256;
+
+struct Plan {
+    input: String,
+    double: bool,
+    width: usize,
+    outputs: Vec<String>,
+    max_batch: usize,
+}
+
+pub(crate) struct OnnxPublisher {
+    model: Arc<OnnxModel>,
+    plan: Arc<Plan>,
+    features: Vec<CompiledTemplate>,
+}
+
+impl OnnxPublisher {
+    pub(crate) async fn new(config: ScoreConfig) -> anyhow::Result<Self> {
+        if config.features.is_empty() {
+            bail!("onnx needs at least one entry in 'features'");
+        }
+        let features = config
+            .features
+            .iter()
+            .enumerate()
+            .map(|(i, f)| {
+                CompiledTemplate::compile(f, None).with_context(|| format!("features[{i}]"))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let width = features.len();
+        let max_batch = config.max_batch.unwrap_or(DEFAULT_MAX_BATCH).max(1);
+        let (input, outputs) = (config.input_name.clone(), config.outputs.clone());
+        let (model, plan) = onnx::open_and_warm_up(
+            "onnx score",
+            config.model.clone(),
+            config.threads.unwrap_or(onnx::DEFAULT_THREADS),
+            config.device,
+            format!("{max_batch} rows × {width} features"),
+            move |model| {
+                let plan = plan_for(model, input, outputs, width, max_batch)?;
+                run_batch(model, &plan, vec![0.0; max_batch * width])?;
+                Ok(plan)
+            },
+        )
+        .await?;
+        Ok(Self {
+            model,
+            plan: Arc::new(plan),
+            features,
+        })
+    }
+
+    async fn score(&self, messages: &[CanonicalMessage]) -> Vec<Result<Value, PublisherError>> {
+        let mut answers: Vec<Option<Result<Value, PublisherError>>> =
+            messages.iter().map(|_| None).collect();
+        let mut rows = Vec::new();
+        let mut values = Vec::with_capacity(messages.len() * self.plan.width);
+        for (index, message) in messages.iter().enumerate() {
+            match features_of("feature", &self.features, message) {
+                Ok(row) => {
+                    rows.push(index);
+                    values.extend(row);
+                }
+                Err(e) => answers[index] = Some(Err(PublisherError::NonRetryable(e))),
+            }
+        }
+        if !rows.is_empty() {
+            let plan = self.plan.clone();
+            let scored = onnx::infer(self.model.clone(), move |model| {
+                let chunk = plan.max_batch * plan.width;
+                let mut all = Vec::new();
+                for part in values.chunks(chunk) {
+                    all.extend(run_batch(model, &plan, part.to_vec())?);
+                }
+                Ok(all)
+            })
+            .await;
+            match scored {
+                Ok(scores) => {
+                    for (index, score) in rows.into_iter().zip(scores) {
+                        answers[index] = Some(Ok(score));
+                    }
+                }
+                Err(e) => {
+                    let reason = e.to_string();
+                    for index in rows {
+                        answers[index] =
+                            Some(Err(PublisherError::NonRetryable(anyhow!("{reason}"))));
+                    }
+                }
+            }
+        }
+        answers
+            .into_iter()
+            .map(|a| a.unwrap_or_else(|| Err(PublisherError::NonRetryable(anyhow!("not scored")))))
+            .collect()
+    }
+}
+
+/// One feature row; a missing, null or empty feature is NaN, which tree models treat as missing.
+/// Each template's number for `message`; `label` names them in errors.
+pub(crate) fn features_of(
+    label: &str,
+    features: &[CompiledTemplate],
+    message: &CanonicalMessage,
+) -> anyhow::Result<Vec<f64>> {
+    features
+        .iter()
+        .enumerate()
+        .map(|(i, template)| {
+            let Some(raw) = template.render_resolved(Some(message)) else {
+                return Ok(f64::NAN);
+            };
+            parse_feature(&String::from_utf8_lossy(&raw))
+                .ok_or_else(|| anyhow!("{label} {i} is not a number"))
+        })
+        .collect()
+}
+
+fn parse_feature(text: &str) -> Option<f64> {
+    match text.trim() {
+        "" | "null" => Some(f64::NAN),
+        "true" => Some(1.0),
+        "false" => Some(0.0),
+        number => number.parse().ok(),
+    }
+}
+
+fn plan_for(
+    model: &OnnxModel,
+    input: Option<String>,
+    outputs: Option<Vec<String>>,
+    width: usize,
+    max_batch: usize,
+) -> anyhow::Result<Plan> {
+    let inputs = model.inputs();
+    let (name, dtype) = match &input {
+        Some(wanted) => inputs
+            .iter()
+            .find(|(name, _)| name == wanted)
+            .ok_or_else(|| anyhow!("ONNX model '{}' has no input '{wanted}'", model.path))?,
+        None => match inputs.as_slice() {
+            [only] => only,
+            _ => bail!(
+                "ONNX model '{}' has {} inputs; name the one for the features in 'input_name'",
+                model.path,
+                inputs.len()
+            ),
+        },
+    };
+    let double = match dtype.tensor_type() {
+        Some(TensorElementType::Float32) => false,
+        Some(TensorElementType::Float64) => true,
+        _ => bail!("ONNX model input '{name}' is {dtype}; onnx feeds float or double tensors"),
+    };
+    if let Some(shape) = dtype.tensor_shape() {
+        match shape.last() {
+            Some(&fixed) if fixed > 0 && fixed as usize != width => bail!(
+                "ONNX model input '{name}' takes {fixed} features, but {width} are configured"
+            ),
+            _ if shape.len() != 2 => bail!(
+                "ONNX model input '{name}' has rank {}; onnx feeds [rows, features]",
+                shape.len()
+            ),
+            _ => {}
+        }
+    }
+    let available: Vec<String> = model.outputs().into_iter().map(|(n, _)| n).collect();
+    let outputs = match outputs {
+        Some(wanted) => {
+            if let Some(missing) = wanted.iter().find(|w| !available.contains(w)) {
+                bail!(
+                    "ONNX model '{}' has no output '{missing}'; it has {}",
+                    model.path,
+                    available.join(", ")
+                );
+            }
+            wanted
+        }
+        None => available,
+    };
+    Ok(Plan {
+        input: name.clone(),
+        double,
+        width,
+        outputs,
+        max_batch,
+    })
+}
+
+/// Scores `values`, `width` per row, into one JSON object of outputs per row.
+fn run_batch(model: &OnnxModel, plan: &Plan, values: Vec<f64>) -> anyhow::Result<Vec<Value>> {
+    let rows = values.len() / plan.width;
+    let shape = [rows as i64, plan.width as i64];
+    let tensor: DynValue = if plan.double {
+        Tensor::from_array((shape, values)).map(Tensor::into_dyn)
+    } else {
+        let values: Vec<f32> = values.into_iter().map(|v| v as f32).collect();
+        Tensor::from_array((shape, values)).map(Tensor::into_dyn)
+    }
+    .map_err(|e| anyhow!("{e}"))?;
+    model.with_session(|session| {
+        let outputs = session
+            .run(vec![(plan.input.as_str(), tensor)])
+            .map_err(|e| anyhow!("{e}"))?;
+        let mut objects: Vec<Map<String, Value>> = (0..rows).map(|_| Map::new()).collect();
+        for name in &plan.outputs {
+            let per_row = rows_of(&outputs[name.as_str()], rows)
+                .with_context(|| format!("output '{name}'"))?;
+            for (object, value) in objects.iter_mut().zip(per_row) {
+                object.insert(name.clone(), value);
+            }
+        }
+        Ok(objects.into_iter().map(Value::Object).collect())
+    })
+}
+
+/// Splits an output into one JSON value per row: a number, a list, a string,
+/// or an object of class to probability for a classifier's map output.
+fn rows_of(value: &DynValue, rows: usize) -> anyhow::Result<Vec<Value>> {
+    let failed = |e: ort::Error| anyhow!("{e}");
+    match value.dtype() {
+        ValueType::Tensor { ty, .. } => {
+            let (shape, cells) = match ty {
+                TensorElementType::String => {
+                    let (shape, text) = value.try_extract_strings().map_err(failed)?;
+                    (
+                        shape.to_vec(),
+                        text.into_iter().map(Value::String).collect(),
+                    )
+                }
+                TensorElementType::Float32 => {
+                    cells(value.try_extract_tensor::<f32>(), |x| float_value(*x))?
+                }
+                TensorElementType::Float64 => cells(value.try_extract_tensor::<f64>(), |x| {
+                    serde_json::Number::from_f64(*x).map_or(Value::Null, Value::Number)
+                })?,
+                TensorElementType::Int64 => {
+                    cells(value.try_extract_tensor::<i64>(), |x| Value::from(*x))?
+                }
+                TensorElementType::Int32 => {
+                    cells(value.try_extract_tensor::<i32>(), |x| Value::from(*x))?
+                }
+                TensorElementType::Bool => {
+                    cells(value.try_extract_tensor::<bool>(), |x| Value::from(*x))?
+                }
+                other => bail!("{other} tensors are not supported"),
+            };
+            split_rows(&shape, cells, rows)
+        }
+        ValueType::Sequence(_) => {
+            let maps = value
+                .try_extract_sequence::<DynMapValueType>()
+                .map_err(failed)?;
+            if maps.len() != rows {
+                bail!("has {} entries for {rows} rows", maps.len());
+            }
+            maps.iter().map(map_value).collect()
+        }
+        other => bail!("{other} outputs are not supported"),
+    }
+}
+
+type Cells = (Vec<i64>, Vec<Value>);
+
+fn cells<T>(
+    extracted: ort::Result<(&ort::value::Shape, &[T])>,
+    convert: impl Fn(&T) -> Value,
+) -> anyhow::Result<Cells> {
+    let (shape, data) = extracted.map_err(|e| anyhow!("{e}"))?;
+    Ok((shape.to_vec(), data.iter().map(convert).collect()))
+}
+
+/// `[rows]` and `[rows, 1]` give a value per row, `[rows, k]` a list of `k`.
+fn split_rows(shape: &[i64], cells: Vec<Value>, rows: usize) -> anyhow::Result<Vec<Value>> {
+    if shape.first().map(|r| *r as usize) != Some(rows) {
+        bail!("has shape {shape:?} for {rows} rows");
+    }
+    let width = cells.len() / rows.max(1);
+    if width <= 1 {
+        return Ok(cells);
+    }
+    let mut cells = cells.into_iter();
+    Ok((0..rows)
+        .map(|_| Value::Array(cells.by_ref().take(width).collect()))
+        .collect())
+}
+
+/// A map output as an object, keys in label order: ONNX Runtime returns them unordered.
+fn map_value(map: &ort::value::Value<DynMapValueType>) -> anyhow::Result<Value> {
+    let entries: Vec<(String, f32)> = match map.try_extract_map::<i64, f32>() {
+        Ok(entries) => {
+            let mut entries: Vec<(i64, f32)> = entries.into_iter().collect();
+            entries.sort_unstable_by_key(|(k, _)| *k);
+            entries
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect()
+        }
+        Err(_) => {
+            let mut entries: Vec<(String, f32)> = map
+                .try_extract_map::<String, f32>()
+                .map_err(|e| anyhow!("{e}"))?
+                .into_iter()
+                .collect();
+            entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+            entries
+        }
+    };
+    Ok(Value::Object(
+        entries
+            .into_iter()
+            .map(|(k, v)| (k, float_value(v)))
+            .collect(),
+    ))
+}
+
+#[async_trait]
+impl MessagePublisher for OnnxPublisher {
+    async fn send_batch(
+        &self,
+        messages: Vec<CanonicalMessage>,
+    ) -> Result<SentBatch, PublisherError> {
+        if messages.is_empty() {
+            return Ok(SentBatch::Ack);
+        }
+        let answers = self.score(&messages).await;
+        Ok(crate::sent_batch(messages, answers))
+    }
+
+    async fn lookup_each(
+        &self,
+        requests: &[CanonicalMessage],
+    ) -> Option<Vec<Result<Option<Value>, PublisherError>>> {
+        let answers = self.score(requests).await;
+        Some(answers.into_iter().map(|a| a.map(Some)).collect())
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+impl std::fmt::Debug for OnnxPublisher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OnnxPublisher")
+            .field("model", &model_name(&self.model))
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn features_read_numbers_and_missing_values() {
+        let templates = [
+            "${payload:a}",
+            "${payload:b}",
+            "${payload:c}",
+            "${payload:d}",
+        ]
+        .map(|t| CompiledTemplate::compile(t, None).unwrap());
+        let message = CanonicalMessage::from(r#"{"a": 3, "b": "1.5", "c": null}"#);
+        let row = features_of("feature", &templates, &message).unwrap();
+        assert_eq!(&row[..2], &[3.0, 1.5]);
+        assert!(row[2].is_nan() && row[3].is_nan());
+
+        let text = CanonicalMessage::from(r#"{"a": "high"}"#);
+        assert!(features_of("feature", &templates[..1], &text).is_err());
+    }
+
+    #[test]
+    fn outputs_split_into_rows() {
+        let flat = vec![json!(1), json!(2)];
+        assert_eq!(split_rows(&[2], flat.clone(), 2).unwrap(), flat);
+        assert_eq!(split_rows(&[2, 1], flat.clone(), 2).unwrap(), flat);
+        let probabilities = vec![json!(0.9), json!(0.1), json!(0.2), json!(0.8)];
+        assert_eq!(
+            split_rows(&[2, 2], probabilities, 2).unwrap(),
+            vec![json!([0.9, 0.1]), json!([0.2, 0.8])]
+        );
+        assert!(split_rows(&[3], vec![json!(1); 3], 2).is_err());
+    }
+}

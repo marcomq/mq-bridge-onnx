@@ -1,0 +1,46 @@
+{
+  "name": "mq-bridge-onnx",
+  "version": "0.1.0",
+  "description": "Local ONNX inference endpoints for mq-bridge: text embeddings and model scoring, shipped as a native plugin",
+  "license": "MIT OR Apache-2.0",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./package.json": "./package.json",
+    "./mq-bridge-plugin.json": "./mq-bridge-plugin.json"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "README.md",
+    "mq-bridge-plugin.json",
+    "prebuilds/"
+  ],
+  "keywords": [
+    "messaging",
+    "onnx",
+    "mq-bridge",
+    "embeddings",
+    "inference"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/marcomq/mq-bridge-onnx.git"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "peerDependencies": {
+    "mq-bridge": ">=0.4.18"
+  },
+  "devDependencies": {
+    "mq-bridge": "0.4.18"
+  }
+}

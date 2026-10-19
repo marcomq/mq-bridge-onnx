@@ -1,0 +1,47 @@
+[package]
+name = "mq-bridge-onnx"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "MIT OR Apache-2.0"
+description = "Local ONNX inference endpoints for mq-bridge: text embeddings and tabular model scoring"
+repository = "https://github.com/marcomq/mq-bridge-onnx"
+include = ["/src/**", "/tests/**", "/Cargo.toml", "/README.md", "/LICENSE-MIT", "/LICENSE-APACHE"]
+
+[lib]
+# `rlib` for Rust users who link the endpoints directly; `cdylib` is the loadable
+# plugin the Python and npm packages ship and `load_endpoint_plugin` opens.
+crate-type = ["rlib", "cdylib"]
+doctest = false
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+mq-bridge = { version = "1.0.1", default-features = false }
+# ort has no stable 2.0 and its rc releases break the API, hence the exact pin.
+# `download-binaries` links a prebuilt static ONNX Runtime (sha256-checked, from
+# pyke's CDN; ORT_LIB_LOCATION points at a local build instead). There is none for
+# musl or Intel macOS. `api-22` is the oldest runtime API the code uses.
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "download-binaries", "tls-rustls", "api-22"] }
+# Derives the configuration schema from the config structs, so the two cannot drift.
+schemars = "1.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"] }
+tokio = { version = "1.34", features = ["rt"] }
+tracing = "0.1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+mq-bridge = { version = "1.0.1", default-features = false, features = ["plugin-sdk", "test-utils"] }
+tokio = { version = "1.34", features = ["rt-multi-thread", "macros"] }
+
+[features]
+# The plugin export is on by default: it is what the Python and npm packages
+# load. Turn it off (`default-features = false`) when linking this crate
+# directly alongside another plugin, since both would define the same
+# `mq_bridge_plugin_v1` symbol.
+default = ["plugin"]
+plugin = ["mq-bridge/plugin-sdk"]

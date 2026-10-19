@@ -1,0 +1,18 @@
+/target
+Cargo.lock
+__pycache__/
+*.py[cod]
+.serena
+.tokensave
+node/prebuilds/
+node/node_modules/
+python/dist/
+python/build/
+python/*.egg-info/
+python/mq_bridge_onnx/*.so
+python/mq_bridge_onnx/*.dylib
+python/mq_bridge_onnx/*.dll
+/packaging/conda/stage/
+/packaging/conda/output/
+# Local [patch] against an unreleased mq-bridge checkout.
+/.cargo/config.toml

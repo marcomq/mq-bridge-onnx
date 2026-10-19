@@ -1,0 +1,4 @@
+{
+  "name": "onnx",
+  "library": "mq_bridge_onnx"
+}
