@@ -402,7 +402,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -971,7 +971,7 @@ dependencies = [
 
 [[package]]
 name = "mq-bridge"
-version = "1.0.2"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -985,7 +985,6 @@ dependencies = [
  "memchr",
  "object",
  "once_cell",
- "percent-encoding",
  "rand 0.10.3",
  "rmp-serde",
  "serde",
