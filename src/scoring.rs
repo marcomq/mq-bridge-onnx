@@ -92,17 +92,30 @@ impl OnnxPublisher {
             let plan = self.plan.clone();
             let scored = onnx::infer(self.model.clone(), move |model| {
                 let chunk = plan.max_batch * plan.width;
-                let mut all = Vec::new();
-                for part in values.chunks(chunk) {
-                    all.extend(run_batch(model, &plan, part.to_vec())?);
-                }
-                Ok(all)
+                Ok(values
+                    .chunks(chunk)
+                    .map(|part| run_batch(model, &plan, part.to_vec()))
+                    .collect::<Vec<_>>())
             })
             .await;
             match scored {
-                Ok(scores) => {
-                    for (index, score) in rows.into_iter().zip(scores) {
-                        answers[index] = Some(Ok(score));
+                Ok(chunks) => {
+                    for (indices, chunk) in rows.chunks(self.plan.max_batch).zip(chunks) {
+                        match chunk {
+                            Ok(scores) => {
+                                for (index, score) in indices.iter().zip(scores) {
+                                    answers[*index] = Some(Ok(score));
+                                }
+                            }
+                            Err(e) => {
+                                let reason = format!("{e:#}");
+                                for index in indices {
+                                    answers[*index] = Some(Err(PublisherError::NonRetryable(
+                                        anyhow!("{reason}"),
+                                    )));
+                                }
+                            }
+                        }
                     }
                 }
                 Err(e) => {
@@ -121,8 +134,8 @@ impl OnnxPublisher {
     }
 }
 
-/// One feature row; a missing, null or empty feature is NaN, which tree models treat as missing.
-/// Each template's number for `message`; `label` names them in errors.
+/// Each template's number for `message`; `label` names them in errors. A missing,
+/// null or empty value is NaN, which tree models treat as missing.
 pub(crate) fn features_of(
     label: &str,
     features: &[CompiledTemplate],
@@ -178,19 +191,33 @@ fn plan_for(
         _ => bail!("ONNX model input '{name}' is {dtype}; onnx feeds float or double tensors"),
     };
     if let Some(shape) = dtype.tensor_shape() {
-        match shape.last() {
-            Some(&fixed) if fixed > 0 && fixed as usize != width => bail!(
-                "ONNX model input '{name}' takes {fixed} features, but {width} are configured"
-            ),
-            _ if shape.len() != 2 => bail!(
+        if shape.len() != 2 {
+            bail!(
                 "ONNX model input '{name}' has rank {}; onnx feeds [rows, features]",
                 shape.len()
+            );
+        }
+        let (batch, features) = (shape[0], shape[1]);
+        if features > 0 && features as usize != width {
+            bail!(
+                "ONNX model input '{name}' takes {features} features, but {width} are configured"
+            );
+        }
+        match batch {
+            1 if max_batch != 1 => {
+                bail!("ONNX model input '{name}' takes one row per call; set `max_batch: 1`")
+            }
+            rows if rows > 1 => bail!(
+                "ONNX model input '{name}' takes exactly {rows} rows per call; export it with a dynamic batch dimension"
             ),
             _ => {}
         }
     }
     let available: Vec<String> = model.outputs().into_iter().map(|(n, _)| n).collect();
     let outputs = match outputs {
+        Some(wanted) if wanted.is_empty() => {
+            bail!("`outputs` names no output; leave it out to get all of them")
+        }
         Some(wanted) => {
             if let Some(missing) = wanted.iter().find(|w| !available.contains(w)) {
                 bail!(

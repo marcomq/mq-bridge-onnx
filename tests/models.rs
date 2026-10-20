@@ -79,6 +79,25 @@ async fn a_feature_count_the_model_does_not_take_is_refused() {
 }
 
 #[tokio::test]
+async fn an_empty_output_list_is_refused() {
+    let config = json!({
+        "task": "score",
+        "model": CLASSIFIER,
+        "features": ["${payload:a}", "${payload:b}", "${payload:c}"],
+        "outputs": [],
+    });
+    let error = OnnxFactory
+        .create_publisher("onnx", &config)
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        format!("{error:#}").contains("names no output"),
+        "{error:#}"
+    );
+}
+
+#[tokio::test]
 async fn minilm_vectors_match_sentence_transformers_pooling() {
     let Ok(dir) = std::env::var("MQB_ONNX_TEST_MODEL_DIR") else {
         eprintln!("skipped: MQB_ONNX_TEST_MODEL_DIR is not set");
