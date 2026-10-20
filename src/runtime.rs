@@ -135,28 +135,35 @@ pub(crate) fn peak_memory_bytes() -> Option<u64> {
 }
 
 /// Opens a model, runs `warm_up` once at the largest shape it will see, and logs
-/// what that cost, so a pod's memory can be sized from the log.
+/// what that cost, so a pod's memory can be sized from the log. `warm_up` names
+/// the shape it ran, or `None` when the model takes inputs of any size.
 pub(crate) async fn open_and_warm_up<P: Send + 'static>(
     endpoint: &'static str,
     path: String,
     threads: usize,
     device: OnnxDevice,
-    shape: String,
-    warm_up: impl FnOnce(&OnnxModel) -> anyhow::Result<P> + Send + 'static,
+    warm_up: impl FnOnce(&OnnxModel) -> anyhow::Result<(P, Option<String>)> + Send + 'static,
 ) -> anyhow::Result<(Arc<OnnxModel>, P)> {
     let (model, plan) = tokio::task::spawn_blocking(move || -> anyhow::Result<(OnnxModel, P)> {
         let before = peak_memory_bytes();
         let model = OnnxModel::open(&path, threads, device)?;
-        let plan = warm_up(&model).with_context(|| format!("warm-up of ONNX model '{path}' failed"))?;
+        let (plan, shape) =
+            warm_up(&model).with_context(|| format!("warm-up of ONNX model '{path}' failed"))?;
         let mib = |bytes: u64| bytes / (1024 * 1024);
-        match (before, peak_memory_bytes()) {
-            (Some(before), Some(after)) => tracing::info!(
+        match (shape, before, peak_memory_bytes()) {
+            (Some(shape), Some(before), Some(after)) => tracing::info!(
                 endpoint,
                 model = %path,
                 threads,
                 "ONNX model ready; peak memory {} MiB after a {shape} warm-up ({} MiB before loading)",
                 mib(after),
                 mib(before),
+            ),
+            (None, ..) => tracing::info!(
+                endpoint,
+                model = %path,
+                threads,
+                "ONNX model ready; not warmed up, since its input takes any size"
             ),
             _ => tracing::info!(endpoint, model = %path, threads, "ONNX model ready"),
         }

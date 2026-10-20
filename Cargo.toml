@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
-description = "Local ONNX inference endpoints for mq-bridge: text embeddings and tabular model scoring"
+description = "Local ONNX inference endpoints for mq-bridge: text embeddings, tabular model scoring and image or tensor models"
 repository = "https://github.com/marcomq/mq-bridge-onnx"
 include = ["/src/**", "/tests/**", "/Cargo.toml", "/README.md", "/LICENSE-MIT", "/LICENSE-APACHE"]
 
@@ -17,6 +17,9 @@ doctest = false
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
+base64 = "0.23"
+# Only the decoders the `onnx` middleware reads; resizing is built in.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 mq-bridge = { version = "1.0.1", default-features = false }
 # ort has no stable 2.0 and its rc releases break the API, hence the exact pin.
 # `download-binaries` links a prebuilt static ONNX Runtime (sha256-checked, from

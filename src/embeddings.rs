@@ -89,7 +89,6 @@ impl OnnxEmbeddingsPublisher {
             config.model.clone(),
             config.threads.unwrap_or(onnx::DEFAULT_THREADS),
             config.device,
-            format!("{max_batch} texts × {max_len} tokens"),
             move |model| {
                 let plan = plan_for(model, max_batch, pooling, normalize)?;
                 let longest = warm_tokenizer
@@ -97,7 +96,7 @@ impl OnnxEmbeddingsPublisher {
                     .map_err(|e| anyhow!("{e}"))?;
                 let batch: Vec<&Encoding> = (0..max_batch).map(|_| &longest).collect();
                 run_batch(model, &plan, &batch)?;
-                Ok(plan)
+                Ok((plan, Some(format!("{max_batch} texts × {max_len} tokens"))))
             },
         )
         .await?;
@@ -299,7 +298,7 @@ fn run_batch(model: &OnnxModel, plan: &Plan, batch: &[&Encoding]) -> anyhow::Res
 }
 
 /// One vector per row of a `[rows, tokens, dim]` output; `mask` is `[rows, mask_len]`.
-fn pool(
+pub(crate) fn pool(
     data: &[f32],
     tokens: usize,
     dim: usize,
@@ -329,7 +328,7 @@ fn pool(
         .collect()
 }
 
-fn normalize(vector: &mut [f32]) {
+pub(crate) fn normalize(vector: &mut [f32]) {
     let norm = vector.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-12);
     vector.iter_mut().for_each(|x| *x /= norm);
 }

@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, anyhow, bail};
 use async_trait::async_trait;
+use ort::session::SessionOutputs;
 use ort::value::{DynMapValueType, DynValue, Tensor, TensorElementType, ValueType};
 use serde_json::{Map, Value};
 
@@ -59,11 +60,10 @@ impl OnnxPublisher {
             config.model.clone(),
             config.threads.unwrap_or(onnx::DEFAULT_THREADS),
             config.device,
-            format!("{max_batch} rows × {width} features"),
             move |model| {
                 let plan = plan_for(model, input, outputs, width, max_batch)?;
                 run_batch(model, &plan, vec![0.0; max_batch * width])?;
-                Ok(plan)
+                Ok((plan, Some(format!("{max_batch} rows × {width} features"))))
             },
         )
         .await?;
@@ -170,21 +170,7 @@ fn plan_for(
     width: usize,
     max_batch: usize,
 ) -> anyhow::Result<Plan> {
-    let inputs = model.inputs();
-    let (name, dtype) = match &input {
-        Some(wanted) => inputs
-            .iter()
-            .find(|(name, _)| name == wanted)
-            .ok_or_else(|| anyhow!("ONNX model '{}' has no input '{wanted}'", model.path))?,
-        None => match inputs.as_slice() {
-            [only] => only,
-            _ => bail!(
-                "ONNX model '{}' has {} inputs; name the one for the features in 'input_name'",
-                model.path,
-                inputs.len()
-            ),
-        },
-    };
+    let (name, dtype) = input_of(model, input.as_deref())?;
     let double = match dtype.tensor_type() {
         Some(TensorElementType::Float32) => false,
         Some(TensorElementType::Float64) => true,
@@ -203,18 +189,60 @@ fn plan_for(
                 "ONNX model input '{name}' takes {features} features, but {width} are configured"
             );
         }
-        match batch {
-            1 if max_batch != 1 => {
-                bail!("ONNX model input '{name}' takes one row per call; set `max_batch: 1`")
-            }
-            rows if rows > 1 => bail!(
-                "ONNX model input '{name}' takes exactly {rows} rows per call; export it with a dynamic batch dimension"
-            ),
-            _ => {}
-        }
+        check_batch(&name, batch, max_batch)?;
     }
+    let outputs = outputs_of(model, outputs)?;
+    Ok(Plan {
+        input: name,
+        double,
+        width,
+        outputs,
+        max_batch,
+    })
+}
+
+/// The model input named `wanted`, or its only one.
+pub(crate) fn input_of(
+    model: &OnnxModel,
+    wanted: Option<&str>,
+) -> anyhow::Result<(String, ValueType)> {
+    let inputs = model.inputs();
+    match wanted {
+        Some(wanted) => inputs
+            .into_iter()
+            .find(|(name, _)| name == wanted)
+            .ok_or_else(|| anyhow!("ONNX model '{}' has no input '{wanted}'", model.path)),
+        None => match <[_; 1]>::try_from(inputs) {
+            Ok([only]) => Ok(only),
+            Err(inputs) => bail!(
+                "ONNX model '{}' has {} inputs; name one in 'input_name'",
+                model.path,
+                inputs.len()
+            ),
+        },
+    }
+}
+
+/// Refuses a fixed batch dimension that batches of up to `max_batch` cannot fill.
+pub(crate) fn check_batch(name: &str, batch: i64, max_batch: usize) -> anyhow::Result<()> {
+    match batch {
+        1 if max_batch != 1 => {
+            bail!("ONNX model input '{name}' takes one row per call; set `max_batch: 1`")
+        }
+        rows if rows > 1 => bail!(
+            "ONNX model input '{name}' takes exactly {rows} rows per call; export it with a dynamic batch dimension"
+        ),
+        _ => Ok(()),
+    }
+}
+
+/// The `wanted` model outputs, all of them by default.
+pub(crate) fn outputs_of(
+    model: &OnnxModel,
+    wanted: Option<Vec<String>>,
+) -> anyhow::Result<Vec<String>> {
     let available: Vec<String> = model.outputs().into_iter().map(|(n, _)| n).collect();
-    let outputs = match outputs {
+    Ok(match wanted {
         Some(wanted) if wanted.is_empty() => {
             bail!("`outputs` names no output; leave it out to get all of them")
         }
@@ -229,13 +257,6 @@ fn plan_for(
             wanted
         }
         None => available,
-    };
-    Ok(Plan {
-        input: name.clone(),
-        double,
-        width,
-        outputs,
-        max_batch,
     })
 }
 
@@ -254,16 +275,25 @@ fn run_batch(model: &OnnxModel, plan: &Plan, values: Vec<f64>) -> anyhow::Result
         let outputs = session
             .run(vec![(plan.input.as_str(), tensor)])
             .map_err(|e| anyhow!("{e}"))?;
-        let mut objects: Vec<Map<String, Value>> = (0..rows).map(|_| Map::new()).collect();
-        for name in &plan.outputs {
-            let per_row = rows_of(&outputs[name.as_str()], rows)
-                .with_context(|| format!("output '{name}'"))?;
-            for (object, value) in objects.iter_mut().zip(per_row) {
-                object.insert(name.clone(), value);
-            }
-        }
-        Ok(objects.into_iter().map(Value::Object).collect())
+        objects_of(&outputs, &plan.outputs, rows)
     })
+}
+
+/// One JSON object of the `names` outputs per row.
+pub(crate) fn objects_of(
+    outputs: &SessionOutputs<'_>,
+    names: &[String],
+    rows: usize,
+) -> anyhow::Result<Vec<Value>> {
+    let mut objects: Vec<Map<String, Value>> = (0..rows).map(|_| Map::new()).collect();
+    for name in names {
+        let per_row =
+            rows_of(&outputs[name.as_str()], rows).with_context(|| format!("output '{name}'"))?;
+        for (object, value) in objects.iter_mut().zip(per_row) {
+            object.insert(name.clone(), value);
+        }
+    }
+    Ok(objects.into_iter().map(Value::Object).collect())
 }
 
 /// Splits an output into one JSON value per row: a number, a list, a string,
@@ -322,19 +352,25 @@ fn cells<T>(
     Ok((shape.to_vec(), data.iter().map(convert).collect()))
 }
 
-/// `[rows]` and `[rows, 1]` give a value per row, `[rows, k]` a list of `k`.
+/// `[rows]` and `[rows, 1]` give a value per row, `[rows, k]` a list of `k`, and
+/// `[rows, k, m]` a list of `k` lists of `m`.
 fn split_rows(shape: &[i64], cells: Vec<Value>, rows: usize) -> anyhow::Result<Vec<Value>> {
     if shape.first().map(|r| *r as usize) != Some(rows) {
         bail!("has shape {shape:?} for {rows} rows");
     }
-    let width = cells.len() / rows.max(1);
-    if width <= 1 {
+    let inner: Vec<usize> = shape[1..].iter().map(|d| *d as usize).collect();
+    if inner.iter().product::<usize>() <= 1 {
         return Ok(cells);
     }
     let mut cells = cells.into_iter();
-    Ok((0..rows)
-        .map(|_| Value::Array(cells.by_ref().take(width).collect()))
-        .collect())
+    Ok((0..rows).map(|_| nest(&mut cells, &inner)).collect())
+}
+
+fn nest(cells: &mut impl Iterator<Item = Value>, dims: &[usize]) -> Value {
+    match dims {
+        [] => cells.next().unwrap_or(Value::Null),
+        [len, inner @ ..] => Value::Array((0..*len).map(|_| nest(cells, inner)).collect()),
+    }
 }
 
 /// A map output as an object, keys in label order: ONNX Runtime returns them unordered.
@@ -434,5 +470,10 @@ mod tests {
             vec![json!([0.9, 0.1]), json!([0.2, 0.8])]
         );
         assert!(split_rows(&[3], vec![json!(1); 3], 2).is_err());
+        let cube: Vec<Value> = (0..8).map(|i| json!(i)).collect();
+        assert_eq!(
+            split_rows(&[2, 2, 2], cube, 2).unwrap(),
+            vec![json!([[0, 1], [2, 3]]), json!([[4, 5], [6, 7]])]
+        );
     }
 }

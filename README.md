@@ -2,13 +2,15 @@
 
 Local ONNX inference for [mq-bridge](https://github.com/marcomq/mq-bridge), as a
 native plugin. It adds one output-only endpoint, `onnx`, that answers every
-message, so it works as a route output and inside `lookup`. Its `task` picks the
-answer:
+message, so it works as a route output and inside `lookup`, and a middleware of
+the same name that turns images and arrays into tensors for it. The endpoint's
+`task` picks the answer:
 
 | `task` | Input | Answer |
 | --- | --- | --- |
 | `embeddings` | a text template, plus optional numbers | a JSON array of floats, like `openai_embeddings` |
 | `score` | numeric feature templates | a JSON object of the model's outputs |
+| `tensor` | a tensor per message, from the `onnx` middleware | the model's outputs, or one vector such as an image embedding |
 
 `score` runs CatBoost, XGBoost and LightGBM exports and other ONNX models with one
 numeric input. ONNX Runtime is linked into the library, so nothing else has to
@@ -114,6 +116,84 @@ The answer for a CatBoost classifier is `{"label": 1, "probabilities": {"0": 0.0
 - CatBoost exports only numeric features to ONNX; encode categorical ones as
   numbers before training.
 
+## Tensors and images
+
+The `onnx` middleware decodes each message into a tensor: a PNG or JPEG image,
+a JSON array or a NumPy `.npy` file, optionally base64 encoded. Task `tensor`
+stacks those tensors into batches for a model with one input. An image embedding
+with a CLIP or ViT vision model exported by Hugging Face Optimum:
+
+```yaml
+middlewares:
+  - lookup:
+      from:
+        custom:
+          name: onnx
+          config:
+            task: tensor
+            model: "/models/clip-vision/model.onnx"
+            vector: image_embeds
+        middlewares:
+          - custom:
+              name: onnx
+              config:
+                decode: image
+                from: "${payload:photo}"
+                base64: true
+                preprocessor: "/models/clip-vision/preprocessor_config.json"
+      into: embedding
+```
+
+Middleware fields:
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `decode` | required | `image`, `json` or `npy` |
+| `from` | the payload | template of the input, e.g. `${payload:photo}` |
+| `base64` | `false` | decode base64 first; a `data:...;base64,` prefix is skipped |
+| `dtype` | `float32` | json: `float32`, `float64`, `int32`, `int64` or `uint8` |
+| `preprocessor` | none | image: a Hugging Face `preprocessor_config.json` to read the settings below from |
+| `size` | none | image: resize to this shortest edge, or to `[height, width]` |
+| `crop` | none | image: centre crop to this square, or to `[height, width]` |
+| `rescale` | `1/255` | image: factor of each 0–255 pixel value |
+| `mean`, `std` | none | image: per-channel normalisation, after rescaling |
+
+An image becomes a `[3, height, width]` float32 tensor (channels first, RGB).
+The payload is the tensor's raw little-endian elements; the metadata names them:
+
+| Metadata | Example |
+| --- | --- |
+| `tensor_dtype` | `float32` |
+| `tensor_shape` | `3,224,224`, without the batch dimension |
+| `image_width`, `image_height` | the size before resizing |
+| `image_preprocessing` | the settings applied, as JSON |
+| `tensor_error` | why the message did not decode |
+
+A message that does not decode keeps its payload and gets `tensor_error`; task
+`tensor` then fails that message alone.
+
+Task fields:
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `task` | required | `tensor` |
+| `model` | required | path of the `.onnx` file |
+| `outputs` | all | model outputs in the answer, as an object like `score`'s |
+| `vector` | none | answer with this one output as a flat vector instead |
+| `pooling` | `mean` | `vector` of shape `[rows, tokens, dim]`: `mean` or `cls` |
+| `normalize` | `true` | `vector`: scale to length 1 |
+| `input_name` | the only input | model input the tensors go to |
+| `max_batch` | `32` | tensors per inference call |
+| `threads`, `device` | as above | |
+
+- Each tensor must match the model input's shape after the batch dimension;
+  other shapes fail their message alone. Tensors of different free sizes
+  (e.g. a model taking any image size) run in separate batches.
+- Elements are cast to the model input's type, so `.npy` doubles feed a float
+  model.
+- Resampling is the `image` crate's, so pixels can differ slightly from
+  Pillow's and embeddings slightly from Python's.
+
 ## URIs
 
 ```sh
@@ -151,7 +231,9 @@ cargo test
 `tests/models.rs` also checks MiniLM against reference vectors when
 `MQB_ONNX_TEST_MODEL_DIR` names a folder with all-MiniLM-L6-v2's `model.onnx`
 and `tokenizer.json`; it skips that test otherwise. `tests/fixtures/tiny_classifier.onnx`
-is a 20 KB CatBoost model made by `tests/fixtures/make_tiny_classifier.py`.
+is a 20 KB CatBoost model made by `tests/fixtures/make_tiny_classifier.py`;
+`tiny_tensor.onnx` and `tiny_image.onnx` are hand-built models of a few hundred
+bytes, made by `tests/fixtures/make_tiny_tensor_models.py`.
 
 The build downloads a prebuilt ONNX Runtime from pyke's CDN (checked by sha256).
 Set `ORT_LIB_LOCATION` to a local ONNX Runtime build to build offline.

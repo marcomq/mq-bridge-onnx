@@ -10,7 +10,13 @@
 //! * `embeddings`: text (plus optional numbers) to a vector, a drop-in for
 //!   `openai_embeddings`;
 //! * `score`: numeric features to the model's outputs, e.g. a CatBoost, XGBoost or
-//!   LightGBM export.
+//!   LightGBM export;
+//! * `tensor`: a tensor per message to the model's outputs or to one vector, e.g.
+//!   an image embedding.
+//!
+//! The `onnx` middleware makes those tensors: it decodes a PNG or JPEG image, a
+//! JSON array or a `.npy` file, optionally from base64, into the payload, with the
+//! element type and shape in the metadata.
 //!
 //! ONNX Runtime is linked statically, so nothing has to be installed. The same
 //! implementation is used three ways:
@@ -22,9 +28,13 @@
 //!   library and call the host's generic loader.
 
 mod config;
+mod decode;
 mod embeddings;
+mod preprocess;
 mod runtime;
 mod scoring;
+mod tensor;
+mod tensor_data;
 
 use std::sync::Arc;
 
@@ -38,8 +48,11 @@ use serde_json::Value;
 
 use config::TaskConfig;
 pub use config::{OnnxConfig, OnnxDevice, OnnxPooling, OnnxTask};
+pub use decode::{OnnxDecode, OnnxDecodeConfig, OnnxMiddlewareFactory};
+pub use preprocess::OnnxExtent;
+pub use tensor_data::{DTYPE_KEY, ERROR_KEY, OnnxDtype, SHAPE_KEY};
 
-/// The endpoint name, which is also the plugin's discovery name.
+/// The endpoint and middleware name, which is also the plugin's discovery name.
 pub const NAME: &str = "onnx";
 
 /// Factory of the `onnx` endpoint.
@@ -52,13 +65,16 @@ pub struct OnnxFactory;
 mq_bridge::export_endpoint_plugin! {
     name: "onnx",
     factory: OnnxFactory,
-    capabilities: mq_bridge::plugin::sdk::CAPABILITIES_OUTPUT_ONLY,
+    middleware: OnnxMiddlewareFactory,
+    capabilities: mq_bridge::plugin::sdk::CAPABILITIES_OUTPUT_ONLY
+        | mq_bridge::plugin::sdk::CAPABILITIES_MIDDLEWARE_ONLY,
 }
 
-/// Registers this crate's factory under `onnx`. Only needed when linking this
-/// crate directly; a host that loads the plugin registers it while loading.
+/// Registers this crate's endpoint and middleware under `onnx`. Only needed when
+/// linking this crate directly; a host that loads the plugin registers both.
 pub fn register() -> anyhow::Result<()> {
-    mq_bridge::extensions::register_endpoint_factory(NAME, Arc::new(OnnxFactory))
+    mq_bridge::extensions::register_endpoint_factory(NAME, Arc::new(OnnxFactory))?;
+    mq_bridge::extensions::register_middleware_factory(NAME, Arc::new(OnnxMiddlewareFactory))
 }
 
 #[async_trait]
@@ -82,6 +98,7 @@ impl CustomEndpointFactory for OnnxFactory {
                 Box::new(embeddings::OnnxEmbeddingsPublisher::new(config).await?)
             }
             TaskConfig::Score(config) => Box::new(scoring::OnnxPublisher::new(config).await?),
+            TaskConfig::Tensor(config) => Box::new(tensor::OnnxTensorPublisher::new(config).await?),
         })
     }
 }
