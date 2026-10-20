@@ -402,7 +402,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -971,7 +971,9 @@ dependencies = [
 
 [[package]]
 name = "mq-bridge"
-version = "1.0.3"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "180a9a0c9ce6efbfdb36842653142786435f516775720a33846c3bf622c58d71"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -2371,3 +2373,7 @@ checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
 dependencies = [
  "zune-core",
 ]
+
+[[patch.unused]]
+name = "mq-bridge"
+version = "1.0.3"
