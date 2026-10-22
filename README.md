@@ -18,30 +18,76 @@ be installed. Nothing is trained here: bring your own model files.
 
 ## Install
 
-Installed into a directory on mq-bridge's plugin search path (Homebrew does
-this), the plugin is found when a route or URI names `onnx`, with no
-configuration. Otherwise list it:
+You need mq-bridge 1.0.1 or newer: the `mqb` CLI (`brew install marcomq/tap/mq-bridge-app`,
+other ways in its [install guide](https://marcomq.github.io/mq-bridge/INSTALL.html)),
+or the mq-bridge library for Python, Node.js or Rust. Then install the plugin:
 
-```yaml
-plugins:
-  - "/opt/mq-bridge/plugins/libmq_bridge_onnx.so"
+| Where | Command |
+| --- | --- |
+| Homebrew: macOS arm64, Linux | `brew install marcomq/tap/mq-bridge-onnx` |
+| Conda: Windows, macOS arm64, Linux | `conda install -c marcomq -c conda-forge mq-bridge-onnx` |
+| Script: macOS arm64, Linux | `curl -fsSL https://raw.githubusercontent.com/marcomq/mq-bridge-onnx/main/install.sh \| sh` |
+| Python | `pip install mq-bridge mq-bridge-onnx`, then `mq_bridge_onnx.register()` |
+| Node.js | `npm install mq-bridge mq-bridge-onnx`, then `register()` from `"mq-bridge-onnx"` |
+| Rust | `cargo add mq-bridge mq-bridge-onnx`, then `mq_bridge_onnx::register()?` |
+
+Homebrew, Conda and the script put the library where `mqb` finds it by itself,
+so nothing has to be configured. [install.sh](install.sh) downloads the latest
+[release](https://github.com/marcomq/mq-bridge-onnx/releases), checks its sha256
+and copies the library to `~/.local/share/mq-bridge/plugins`. A library
+somewhere else is loaded with `MQB_PLUGIN_DIR=<dir>`, `mqb --plugin <file>` or a
+`plugins:` list in the config.
+
+There is no build for Intel macOS or musl (Alpine), since ONNX Runtime has no
+prebuilt static library for them.
+
+## Quick start
+
+Download a model ([all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2),
+90 MB) and its tokenizer, write two lines of input and a route, then run it:
+
+```sh
+HF=https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main
+curl -fL --create-dirs -o models/all-MiniLM-L6-v2/model.onnx "$HF/onnx/model.onnx"
+curl -fL -o models/all-MiniLM-L6-v2/tokenizer.json "$HF/tokenizer.json"
+
+cat > articles.jsonl <<'JSON'
+{"id": 1, "text": "The cat sits on the mat."}
+{"id": 2, "text": "Stock markets fell sharply today."}
+JSON
+
+cat > embed.yaml <<'YAML'
+routes:
+  embed:
+    exit_on_empty: true          # stop once the file is read
+    startup_timeout_ms: 60000    # loading a model can take longer than the 5 s default
+    input:
+      file: { path: "articles.jsonl", format: raw }
+    output:
+      middlewares:
+        - lookup:
+            from:
+              custom:
+                name: onnx
+                config:
+                  task: embeddings
+                  model: "models/all-MiniLM-L6-v2/model.onnx"
+                  input: "${payload:text}"
+            into: embedding
+      file: { path: "vectors.jsonl", format: raw }
+YAML
+
+mqb --config embed.yaml --no-ui
 ```
 
-From Python or Node.js, install `mq-bridge-onnx` and call `register()` once:
+`vectors.jsonl` then holds each input line with an `embedding` of 384 floats:
 
-```python
-import mq_bridge_onnx
-mq_bridge_onnx.register()
+```json
+{"id":1,"text":"The cat sits on the mat.","embedding":[0.1341771,-0.032900326,…]}
 ```
 
-```js
-import { register } from "mq-bridge-onnx";
-register();
-```
-
-Prebuilt for Linux x86_64 and arm64 (glibc), macOS arm64 and Windows x64. There
-is no build for musl or Intel macOS, since ONNX Runtime has no prebuilt static
-library for them.
+If `mqb` reports `Custom endpoint factory 'onnx' not found`, the plugin is not
+installed where it looks; the message lists the directories it searched.
 
 ## Embeddings
 

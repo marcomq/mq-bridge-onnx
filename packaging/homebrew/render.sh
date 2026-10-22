@@ -62,7 +62,7 @@ class MqBridgeOnnx < Formula
   def install
     # \$HOMEBREW_PREFIX/lib/mq-bridge is on mq-bridge's plugin search path.
     (lib/"mq-bridge").install Dir["libmq_bridge_onnx.*"]
-    doc.install "LICENSE-MIT", "LICENSE-APACHE"
+    doc.install "THIRD_PARTY_NOTICES", "LICENSE-MIT", "LICENSE-APACHE"
   end
 
   test do

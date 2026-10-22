@@ -15,3 +15,8 @@ python/mq_bridge_onnx/*.dll
 /packaging/conda/output/
 # Local [patch] against an unreleased mq-bridge checkout.
 /.cargo/config.toml
+# Copied in by the release workflow.
+python/mq_bridge_onnx/THIRD_PARTY_NOTICES
+python/mq_bridge_onnx/LICENSE-*
+node/THIRD_PARTY_NOTICES
+node/LICENSE-*

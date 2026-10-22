@@ -100,7 +100,9 @@ jobs:
 
       - name: Build Python wheel
         shell: bash
-        run: python -m mq_bridge.plugin_packaging --package python/mq_bridge_onnx --out python/dist
+        run: |
+          cp THIRD_PARTY_NOTICES LICENSE-MIT LICENSE-APACHE python/mq_bridge_onnx/
+          python -m mq_bridge.plugin_packaging --package python/mq_bridge_onnx --out python/dist
 
       - name: Retag macOS wheel
         if: runner.os == 'macOS'
@@ -148,7 +150,7 @@ jobs:
           staging.mkdir(parents=True)
           shutil.copy2(libraries[0], staging / libraries[0].name)
           shutil.copy2("node/mq-bridge-plugin.json", staging / "mq-bridge-plugin.json")
-          for name in ("LICENSE-MIT", "LICENSE-APACHE"):
+          for name in ("THIRD_PARTY_NOTICES", "LICENSE-MIT", "LICENSE-APACHE"):
               shutil.copy2(name, staging / name)
 
           # One archive shape on every platform — name, version, Rust target
@@ -249,7 +251,9 @@ jobs:
 
       - name: Create npm tarball
         working-directory: node
-        run: mkdir -p ../dist && npm pack --pack-destination ../dist
+        run: |
+          cp ../THIRD_PARTY_NOTICES ../LICENSE-MIT ../LICENSE-APACHE .
+          mkdir -p ../dist && npm pack --pack-destination ../dist
 
       - name: Publish to npm
         env:

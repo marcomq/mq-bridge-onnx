@@ -47,6 +47,23 @@ jobs:
       - name: Endpoint behaviour, linked and plugin-loaded
         run: cargo test --locked
 
+  install-script:
+    name: install.sh (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install the latest release
+        run: |
+          sh install.sh
+          ls ~/.local/share/mq-bridge/plugins/libmq_bridge_onnx.*
+
   node-package:
     name: Node package smoke test
     runs-on: ubuntu-latest

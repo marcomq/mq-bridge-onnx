@@ -28,4 +28,4 @@ Repository = "https://github.com/marcomq/mq-bridge-onnx"
 packages = ["mq_bridge_onnx"]
 
 [tool.setuptools.package-data]
-mq_bridge_onnx = ["*.so", "*.dylib", "*.dll", "mq-bridge-plugin.json"]
+mq_bridge_onnx = ["*.so", "*.dylib", "*.dll", "mq-bridge-plugin.json", "THIRD_PARTY_NOTICES", "LICENSE-*"]

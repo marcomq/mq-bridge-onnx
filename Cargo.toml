@@ -25,6 +25,7 @@ mq-bridge = { version = "1.0.1", default-features = false }
 # `download-binaries` links a prebuilt static ONNX Runtime (sha256-checked, from
 # pyke's CDN; ORT_LIB_LOCATION points at a local build instead). There is none for
 # musl or Intel macOS. `api-22` is the oldest runtime API the code uses.
+# Bumping ort can change the ONNX Runtime version: rerun scripts/third_party_notices.sh.
 ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "download-binaries", "tls-rustls", "api-22"] }
 # Derives the configuration schema from the config structs, so the two cannot drift.
 schemars = "1.2"

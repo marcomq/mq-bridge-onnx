@@ -21,7 +21,10 @@
     "index.d.ts",
     "README.md",
     "mq-bridge-plugin.json",
-    "prebuilds/"
+    "prebuilds/",
+    "THIRD_PARTY_NOTICES",
+    "LICENSE-MIT",
+    "LICENSE-APACHE"
   ],
   "keywords": [
     "messaging",
