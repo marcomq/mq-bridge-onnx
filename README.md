@@ -277,7 +277,8 @@ for its answer. `inputs` must name every model input. Once an input has
 `batch: false`, every output is answered whole, as the model returns it:
 `output` as `[[0.93]]` and `stateN` as `[2, 1, 128]`. A constant for an input
 with a dynamic first dimension also needs `max_batch: 1`. A message with one
-tensor feeds the only input that takes one, whatever its name.
+unnamed tensor feeds the only input that takes one, whatever that input's name;
+a named tensor is matched by the input's `from`, which defaults to the input's name.
 
 ## URIs
 
