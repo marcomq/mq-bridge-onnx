@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mq-bridge-onnx"
-version = "0.1.1"
+version = "0.1.2"
 description = "Local ONNX inference endpoints for mq-bridge: text embeddings and model scoring"
 readme = "README.md"
 license = "MIT OR Apache-2.0"

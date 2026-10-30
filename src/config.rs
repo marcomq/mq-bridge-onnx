@@ -3,9 +3,12 @@
 //  Licensed under MIT OR Apache-2.0, see LICENSE file for more details
 //  git clone https://github.com/marcomq/mq-bridge-onnx
 
+use std::collections::BTreeMap;
+
 use anyhow::bail;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// The `onnx` endpoint: runs a local ONNX model on every message.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -38,6 +41,9 @@ pub struct OnnxConfig {
     pub outputs: Option<Vec<String>>,
     /// Score and tensor: model input the features or tensors go to. Defaults to the only one.
     pub input_name: Option<String>,
+    /// Tensor: where each model input comes from, by input name; instead of `input_name`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub inputs: BTreeMap<String, OnnxInput>,
     /// Tensor: answer with this output as one flat vector instead of an object of outputs.
     pub vector: Option<String>,
     /// Messages per inference call. Defaults to 32 for embeddings and tensor, 256 for score.
@@ -59,6 +65,20 @@ pub enum OnnxTask {
     Score,
     /// A tensor per message, as the `onnx` middleware decodes it, to the model's outputs.
     Tensor,
+}
+
+/// Where a model input of task `tensor` comes from: a tensor of the message, or a constant.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OnnxInput {
+    /// The message's tensor of this name. Defaults to the input's name; a message
+    /// with one unnamed tensor feeds the only input that takes one.
+    pub from: Option<String>,
+    /// A constant passed with every call instead, e.g. `16000` or `[0, 1]`, cast to the input's type.
+    pub value: Option<Value>,
+    /// Stack the message tensors along a new first dimension. Defaults to true;
+    /// false passes the tensor whole, as for a state `[2, 1, 128]`, and needs `max_batch: 1`.
+    pub batch: Option<bool>,
 }
 
 /// How token vectors are pooled into one.
@@ -112,6 +132,7 @@ pub(crate) struct ScoreConfig {
 pub(crate) struct TensorConfig {
     pub model: String,
     pub input_name: Option<String>,
+    pub inputs: BTreeMap<String, OnnxInput>,
     pub outputs: Option<Vec<String>>,
     pub vector: Option<String>,
     pub pooling: Option<OnnxPooling>,
@@ -135,9 +156,11 @@ impl OnnxConfig {
                 ("features", !self.features.is_empty()),
                 ("outputs", self.outputs.is_some()),
                 ("input_name", self.input_name.is_some()),
+                ("inputs", !self.inputs.is_empty()),
                 ("vector", self.vector.is_some()),
             ],
             OnnxTask::Score => &[
+                ("inputs", !self.inputs.is_empty()),
                 ("input", self.input.is_some()),
                 ("tokenizer", self.tokenizer.is_some()),
                 ("numbers", !self.numbers.is_empty()),
@@ -167,6 +190,14 @@ impl OnnxConfig {
                     "`pooling` and `normalize` shape the `vector` answer; name its output in `vector`"
                 );
             }
+            if self.input_name.is_some() && !self.inputs.is_empty() {
+                bail!("give `input_name` or `inputs`, not both");
+            }
+            for (name, input) in &self.inputs {
+                if input.value.is_some() && (input.from.is_some() || input.batch.is_some()) {
+                    bail!("`inputs.{name}` is a constant `value`; `from` and `batch` do not apply");
+                }
+            }
         }
         Ok(match self.task {
             OnnxTask::Embeddings => {
@@ -189,6 +220,7 @@ impl OnnxConfig {
             OnnxTask::Tensor => TaskConfig::Tensor(TensorConfig {
                 model: self.model,
                 input_name: self.input_name,
+                inputs: self.inputs,
                 outputs: self.outputs,
                 vector: self.vector,
                 pooling: self.pooling,
@@ -259,6 +291,36 @@ mod tests {
             tensor(json!({ "features": ["1"] }))
                 .unwrap_err()
                 .contains("not read by task \"tensor\"")
+        );
+    }
+
+    #[test]
+    fn tensor_inputs_are_named_once_and_constants_stand_alone() {
+        let tensor = |extra: serde_json::Value| {
+            let mut config = json!({ "task": "tensor", "model": "m.onnx" });
+            config
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            task(config).map(|_| ()).map_err(|e| e.to_string())
+        };
+        let inputs = json!({ "input": {}, "state": { "batch": false }, "sr": { "value": 16000 } });
+        assert!(tensor(json!({ "inputs": inputs })).is_ok());
+        assert!(
+            tensor(json!({ "inputs": inputs, "input_name": "input" }))
+                .unwrap_err()
+                .contains("not both")
+        );
+        assert!(
+            tensor(json!({ "inputs": { "sr": { "value": 1, "from": "x" } } }))
+                .unwrap_err()
+                .contains("constant")
+        );
+        assert!(
+            task(
+                json!({ "task": "score", "model": "m.onnx", "features": ["1"], "inputs": inputs })
+            )
+            .is_err()
         );
     }
 }

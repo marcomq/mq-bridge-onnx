@@ -3,9 +3,9 @@
 //  Licensed under MIT OR Apache-2.0, see LICENSE file for more details
 //  git clone https://github.com/marcomq/mq-bridge-onnx
 
-//! The tensor a message carries between the `onnx` middleware and task `tensor`:
+//! The tensors a message carries between the `onnx` middleware and task `tensor`:
 //! the payload holds the raw little-endian elements of one sample, and metadata
-//! holds their type and shape.
+//! holds their type and shape. Named tensors follow each other in the payload.
 
 use std::fmt::Debug;
 
@@ -22,6 +22,9 @@ pub const DTYPE_KEY: &str = "tensor_dtype";
 pub const SHAPE_KEY: &str = "tensor_shape";
 /// Metadata key of why the middleware could not decode a message.
 pub const ERROR_KEY: &str = "tensor_error";
+/// Metadata key of the names of a message's tensors, e.g. `input,state`. With it,
+/// `tensor_dtype` lists one type per name and `tensor_shape` one shape per name, `;` separated.
+pub const NAMES_KEY: &str = "tensor_names";
 
 /// Element type of a tensor.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -146,8 +149,11 @@ impl TensorData {
         }
     }
 
-    /// The tensor `message` carries, or why it has none.
-    pub(crate) fn of_message(message: &CanonicalMessage) -> anyhow::Result<Self> {
+    /// The tensors `message` carries by name, or why it has none. A message with
+    /// one unnamed tensor gives `None` as its name.
+    pub(crate) fn all_of_message(
+        message: &CanonicalMessage,
+    ) -> anyhow::Result<Vec<(Option<String>, Self)>> {
         if let Some(error) = message.get_metadata(ERROR_KEY) {
             bail!("{error}");
         }
@@ -159,24 +165,68 @@ impl TensorData {
                 "the message has no `{DTYPE_KEY}` and `{SHAPE_KEY}` metadata; decode it with the onnx middleware"
             );
         };
-        let dtype =
-            OnnxDtype::parse(dtype).ok_or_else(|| anyhow!("unknown {DTYPE_KEY} '{dtype}'"))?;
-        let shape = shape
-            .split(',')
-            .filter(|d| !d.trim().is_empty())
-            .map(|d| d.trim().parse::<usize>())
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| anyhow!("{SHAPE_KEY} '{shape}' is not a list of sizes"))?;
-        Self::new(dtype, shape, message.payload.to_vec())
+        let Some(names) = message.get_metadata(NAMES_KEY) else {
+            let tensor = Self::new(
+                parse_dtype(dtype)?,
+                parse_shape(shape)?,
+                message.payload.to_vec(),
+            )?;
+            return Ok(vec![(None, tensor)]);
+        };
+        let [names, dtypes, shapes] = [names.split(','), dtype.split(','), shape.split(';')]
+            .map(|parts| parts.collect::<Vec<_>>());
+        if dtypes.len() != names.len() || shapes.len() != names.len() {
+            bail!(
+                "{} tensor names, {} types and {} shapes in the metadata",
+                names.len(),
+                dtypes.len(),
+                shapes.len()
+            );
+        }
+        let mut rest = &message.payload[..];
+        let mut tensors = Vec::with_capacity(names.len());
+        for ((name, dtype), shape) in names.into_iter().zip(dtypes).zip(shapes) {
+            let (dtype, shape) = (parse_dtype(dtype)?, parse_shape(shape)?);
+            let len = shape.iter().product::<usize>() * dtype.size();
+            if rest.len() < len {
+                bail!("the payload ends inside tensor '{name}'");
+            }
+            let (bytes, after) = rest.split_at(len);
+            rest = after;
+            tensors.push((
+                Some(name.to_string()),
+                Self::new(dtype, shape, bytes.to_vec())?,
+            ));
+        }
+        if !rest.is_empty() {
+            bail!("the payload has {} bytes after its last tensor", rest.len());
+        }
+        Ok(tensors)
     }
 
     /// Writes this tensor into `message`, replacing its payload.
     pub(crate) fn into_message(self, message: &mut CanonicalMessage) {
-        let shape: Vec<String> = self.shape.iter().map(usize::to_string).collect();
         message.set_metadata(DTYPE_KEY, self.dtype.name());
-        message.set_metadata(SHAPE_KEY, shape.join(","));
+        message.set_metadata(SHAPE_KEY, shape_text(&self.shape));
+        message.remove_metadata(NAMES_KEY);
         message.remove_metadata(ERROR_KEY);
         message.payload = self.bytes.into();
+    }
+
+    /// Writes named tensors into `message`, replacing its payload.
+    pub(crate) fn all_into_message(tensors: Vec<(String, Self)>, message: &mut CanonicalMessage) {
+        let names: Vec<&str> = tensors.iter().map(|(name, _)| name.as_str()).collect();
+        let dtypes: Vec<&str> = tensors.iter().map(|(_, t)| t.dtype.name()).collect();
+        let shapes: Vec<String> = tensors.iter().map(|(_, t)| shape_text(&t.shape)).collect();
+        message.set_metadata(NAMES_KEY, names.join(","));
+        message.set_metadata(DTYPE_KEY, dtypes.join(","));
+        message.set_metadata(SHAPE_KEY, shapes.join(";"));
+        message.remove_metadata(ERROR_KEY);
+        message.payload = tensors
+            .into_iter()
+            .flat_map(|(_, t)| t.bytes)
+            .collect::<Vec<u8>>()
+            .into();
     }
 
     /// Appends the elements as `T`, cast when the types differ.
@@ -201,18 +251,17 @@ impl TensorData {
         }
     }
 
-    /// A rectangular, possibly nested JSON array of numbers.
-    pub(crate) fn from_json(text: &[u8], dtype: OnnxDtype) -> anyhow::Result<Self> {
-        let value: Value = serde_json::from_slice(text).map_err(|e| anyhow!("not JSON: {e}"))?;
+    /// A number or a rectangular, possibly nested JSON array of numbers.
+    pub(crate) fn from_json_value(value: &Value, dtype: OnnxDtype) -> anyhow::Result<Self> {
         let mut shape = Vec::new();
-        let mut level = &value;
+        let mut level = value;
         while let Value::Array(items) = level {
             shape.push(items.len());
             let Some(first) = items.first() else { break };
             level = first;
         }
         let mut numbers = Vec::with_capacity(shape.iter().product());
-        flatten(&value, &shape, &mut numbers)?;
+        flatten(value, &shape, &mut numbers)?;
         Ok(match dtype {
             OnnxDtype::Float32 => Self::cast_from(shape, &numbers, f32::from_f64),
             OnnxDtype::Float64 => Self::cast_from(shape, &numbers, f64::from_f64),
@@ -276,6 +325,23 @@ impl TensorData {
     }
 }
 
+fn parse_dtype(name: &str) -> anyhow::Result<OnnxDtype> {
+    OnnxDtype::parse(name).ok_or_else(|| anyhow!("unknown {DTYPE_KEY} '{name}'"))
+}
+
+fn parse_shape(text: &str) -> anyhow::Result<Vec<usize>> {
+    text.split(',')
+        .filter(|d| !d.trim().is_empty())
+        .map(|d| d.trim().parse::<usize>())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| anyhow!("{SHAPE_KEY} '{text}' is not a list of sizes"))
+}
+
+fn shape_text(shape: &[usize]) -> String {
+    let dims: Vec<String> = shape.iter().map(usize::to_string).collect();
+    dims.join(",")
+}
+
 fn flatten(value: &Value, shape: &[usize], out: &mut Vec<f64>) -> anyhow::Result<()> {
     match (value, shape) {
         (Value::Array(items), [len, inner @ ..]) if items.len() == *len => {
@@ -298,18 +364,20 @@ fn flatten(value: &Value, shape: &[usize], out: &mut Vec<f64>) -> anyhow::Result
 mod tests {
     use super::*;
 
+    fn from_json(text: &[u8], dtype: OnnxDtype) -> anyhow::Result<TensorData> {
+        TensorData::from_json_value(&serde_json::from_slice(text)?, dtype)
+    }
+
     #[test]
     fn json_arrays_keep_their_shape() {
-        let tensor = TensorData::from_json(b"[[1, 2, 3], [4, 5, 6]]", OnnxDtype::Int64).unwrap();
+        let tensor = from_json(b"[[1, 2, 3], [4, 5, 6]]", OnnxDtype::Int64).unwrap();
         assert_eq!(tensor.shape, [2, 3]);
         let mut values = Vec::<i64>::new();
         tensor.extend_into(&mut values);
         assert_eq!(values, [1, 2, 3, 4, 5, 6]);
-        assert!(TensorData::from_json(b"[[1, 2], [3]]", OnnxDtype::Float32).is_err());
+        assert!(from_json(b"[[1, 2], [3]]", OnnxDtype::Float32).is_err());
         assert_eq!(
-            TensorData::from_json(b"7", OnnxDtype::Float32)
-                .unwrap()
-                .shape,
+            from_json(b"7", OnnxDtype::Float32).unwrap().shape,
             Vec::<usize>::new()
         );
     }
@@ -319,13 +387,39 @@ mod tests {
         let mut message = CanonicalMessage::from("x");
         TensorData::from_values(vec![3], &[1.5f64, -2.0, 7.0]).into_message(&mut message);
         assert_eq!(message.get_metadata(SHAPE_KEY), Some("3"));
-        let tensor = TensorData::of_message(&message).unwrap();
+        let tensors: [_; 1] = TensorData::all_of_message(&message)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let [(None, tensor)] = tensors else {
+            panic!("expected one unnamed tensor");
+        };
         let mut values = Vec::<f32>::new();
         tensor.extend_into(&mut values);
         assert_eq!(values, [1.5, -2.0, 7.0]);
 
         message.set_metadata(SHAPE_KEY, "4");
-        assert!(TensorData::of_message(&message).is_err());
+        assert!(TensorData::all_of_message(&message).is_err());
+    }
+
+    #[test]
+    fn named_tensors_round_trip_through_a_message() {
+        let mut message = CanonicalMessage::from("x");
+        let input = TensorData::from_values(vec![2], &[1.0f32, 2.0]);
+        let rate = TensorData::from_values(vec![], &[16000i64]);
+        TensorData::all_into_message(
+            vec![("input".into(), input.clone()), ("sr".into(), rate.clone())],
+            &mut message,
+        );
+        assert_eq!(message.get_metadata(SHAPE_KEY), Some("2;"));
+        let tensors = TensorData::all_of_message(&message).unwrap();
+        assert_eq!(
+            tensors,
+            [(Some("input".into()), input), (Some("sr".into()), rate)]
+        );
+
+        message.payload = message.payload[..4].to_vec().into();
+        assert!(TensorData::all_of_message(&message).is_err());
     }
 
     #[test]
