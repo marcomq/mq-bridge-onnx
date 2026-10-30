@@ -165,8 +165,9 @@ The answer for a CatBoost classifier is `{"label": 1, "probabilities": {"0": 0.0
 ## Tensors and images
 
 The `onnx` middleware decodes each message into a tensor: a PNG or JPEG image,
-a JSON array or a NumPy `.npy` file, optionally base64 encoded. Task `tensor`
-stacks those tensors into batches for a model with one input. An image embedding
+a JSON array, a NumPy `.npy` file or PCM / WAV audio, optionally base64 encoded.
+A JSON object of arrays becomes one named tensor per field. Task `tensor`
+stacks those tensors into batches, one per model input. An image embedding
 with a CLIP or ViT vision model exported by Hugging Face Optimum:
 
 ```yaml
@@ -194,7 +195,7 @@ Middleware fields:
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `decode` | required | `image`, `json` or `npy` |
+| `decode` | required | `image`, `json`, `npy`, `pcm` or `wav` |
 | `from` | the payload | template of the input, e.g. `${payload:photo}` |
 | `base64` | `false` | decode base64 first; a `data:...;base64,` prefix is skipped |
 | `dtype` | `float32` | json: `float32`, `float64`, `int32`, `int64` or `uint8` |
@@ -203,16 +204,24 @@ Middleware fields:
 | `crop` | none | image: centre crop to this square, or to `[height, width]` |
 | `rescale` | `1/255` | image: factor of each 0–255 pixel value |
 | `mean`, `std` | none | image: per-channel normalisation, after rescaling |
+| `format` | `s16le` | pcm: `s16le` or `f32le` samples |
+| `channels` | `1` | pcm: interleaved channels, averaged to mono |
+| `sample_rate` | none | pcm: rate in Hz, needed by `resample_to` |
+| `resample_to` | none | pcm, wav: resample to this rate in Hz, e.g. `16000` |
 
 An image becomes a `[3, height, width]` float32 tensor (channels first, RGB).
+Audio becomes a mono `[samples]` float32 tensor in -1..1; `pcm` and `wav` need
+the cargo feature `audio`, which is on by default and in the Python and npm packages.
 The payload is the tensor's raw little-endian elements; the metadata names them:
 
 | Metadata | Example |
 | --- | --- |
 | `tensor_dtype` | `float32` |
 | `tensor_shape` | `3,224,224`, without the batch dimension |
+| `tensor_names` | `input,state`, only for named tensors; `tensor_dtype` then lists one type per name and `tensor_shape` one shape per name, `;` separated, and the payload holds them one after another |
 | `image_width`, `image_height` | the size before resizing |
 | `image_preprocessing` | the settings applied, as JSON |
+| `audio_sample_rate` | `16000`, the rate of the tensor's samples when known |
 | `tensor_error` | why the message did not decode |
 
 A message that does not decode keeps its payload and gets `tensor_error`; task
@@ -229,7 +238,8 @@ Task fields:
 | `pooling` | `mean` | `vector` of shape `[rows, tokens, dim]`: `mean` or `cls` |
 | `normalize` | `true` | `vector`: scale to length 1 |
 | `input_name` | the only input | model input the tensors go to |
-| `max_batch` | `32` | tensors per inference call |
+| `inputs` | none | instead of `input_name`: each model input's source, see below |
+| `max_batch` | `32` | messages per inference call |
 | `threads`, `device` | as above | |
 
 - Each tensor must match the model input's shape after the batch dimension;
@@ -239,6 +249,35 @@ Task fields:
   model.
 - Resampling is the `image` crate's, so pixels can differ slightly from
   Pillow's and embeddings slightly from Python's.
+
+### Several inputs and streaming state
+
+`inputs` maps each model input to a named tensor of the message (`from`,
+defaulting to the input's name) or to a constant `value`. With
+`batch: false` a tensor goes in whole, without a batch dimension in front,
+which needs `max_batch: 1`. A model like Silero VAD takes its state from the
+previous call; the caller carries it, sending each answer's `stateN` back as
+`state` with its next chunk (zeros for the first):
+
+```yaml
+task: tensor
+model: "/models/silero_vad.onnx"
+max_batch: 1
+inputs:
+  input: {}                  # the chunk, [576] samples
+  state: { batch: false }    # [2, 1, 128]
+  sr: { value: 16000 }       # an int64 scalar
+outputs: [output, stateN]
+```
+
+with the middleware's `decode: json` reading messages like
+`{"input": [...], "state": [[[0, ...]], [[0, ...]]]}`. The endpoint itself keeps
+no state, so streams need no key and stay in order as long as each caller waits
+for its answer. `inputs` must name every model input. Once an input has
+`batch: false`, every output is answered whole, as the model returns it:
+`output` as `[[0.93]]` and `stateN` as `[2, 1, 128]`. A constant for an input
+with a dynamic first dimension also needs `max_batch: 1`. A message with one
+tensor feeds the only input that takes one, whatever its name.
 
 ## URIs
 

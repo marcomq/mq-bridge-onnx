@@ -18,6 +18,8 @@ doctest = false
 anyhow = "1"
 async-trait = "0.1"
 base64 = "0.23"
+# Feature `audio`: hound reads WAV files, rubato resamples; ~0.5 MB of the plugin.
+hound = { version = "3.5", optional = true }
 # Only the decoders the `onnx` middleware reads; resizing is built in.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 mq-bridge = { version = "1.0.1", default-features = false }
@@ -27,6 +29,7 @@ mq-bridge = { version = "1.0.1", default-features = false }
 # musl or Intel macOS. `api-22` is the oldest runtime API the code uses.
 # Bumping ort can change the ONNX Runtime version: rerun scripts/third_party_notices.sh.
 ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "download-binaries", "tls-rustls", "api-22"] }
+rubato = { version = "5", optional = true }
 # Derives the configuration schema from the config structs, so the two cannot drift.
 schemars = "1.2"
 serde = { version = "1", features = ["derive"] }
@@ -47,5 +50,7 @@ tokio = { version = "1.34", features = ["rt-multi-thread", "macros"] }
 # load. Turn it off (`default-features = false`) when linking this crate
 # directly alongside another plugin, since both would define the same
 # `mq_bridge_plugin_v1` symbol.
-default = ["plugin"]
+default = ["plugin", "audio"]
 plugin = ["mq-bridge/plugin-sdk"]
+# decode `pcm` and `wav` in the `onnx` middleware.
+audio = ["dep:hound", "dep:rubato"]

@@ -19,6 +19,10 @@ const IMAGE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/tiny_image.onnx"
 );
+const STATEFUL: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/tiny_stateful.onnx"
+);
 
 async fn decoding(decode: Value, task: Value) -> Box<dyn MessagePublisher> {
     let publisher = OnnxFactory.create_publisher("onnx", &task).await.unwrap();
@@ -157,6 +161,159 @@ async fn npy_doubles_are_cast_to_the_float_input() {
     let answer = answers[0].as_ref().unwrap();
     close(&answer["y"], &[2.0, 4.0, 6.0]);
     assert!(answer.get("label").is_none());
+}
+
+fn stateful_task(extra: Value) -> Value {
+    let mut task = json!({
+        "task": "tensor",
+        "model": STATEFUL,
+        "max_batch": 1,
+        "inputs": { "input": {}, "state": { "batch": false }, "sr": { "value": 10 } },
+    });
+    task.as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().unwrap().clone());
+    task
+}
+
+#[tokio::test]
+async fn the_caller_carries_the_state_from_call_to_call() {
+    let publisher = decoding(json!({ "decode": "json" }), stateful_task(json!({}))).await;
+    let mut state = json!([[[0, 0]], [[0, 0]]]);
+    for (chunk, sum, carried) in [([1, 2], 30.0, [1.0, 2.0]), ([3, 4], 70.0, [4.0, 6.0])] {
+        let message = json!({ "input": chunk, "state": state });
+        let answers = answers(
+            publisher.as_ref(),
+            vec![CanonicalMessage::from(message.to_string())],
+        )
+        .await;
+        let answer = answers[0].as_ref().expect("answered");
+        assert_eq!(answer["output"], json!([[sum]]), "output is answered whole");
+        let next: Vec<Vec<Vec<f64>>> = serde_json::from_value(answer["stateN"].clone()).unwrap();
+        assert_eq!(next.len(), 2, "stateN is answered whole: {next:?}");
+        for layer in &next {
+            close(&json!(layer[0]), &carried);
+        }
+        state = answer["stateN"].clone();
+    }
+}
+
+#[tokio::test]
+async fn a_missing_tensor_fails_its_message_alone() {
+    let publisher = decoding(json!({ "decode": "json" }), stateful_task(json!({}))).await;
+    let lookups = publisher
+        .lookup_each(&[CanonicalMessage::from(
+            json!({ "input": [1, 2] }).to_string(),
+        )])
+        .await
+        .unwrap();
+    let error = lookups[0].as_ref().unwrap_err().to_string();
+    assert!(error.contains("'state'"), "{error}");
+}
+
+#[tokio::test]
+async fn a_whole_tensor_needs_one_message_per_call() {
+    let error = OnnxFactory
+        .create_publisher("onnx", &stateful_task(json!({ "max_batch": 4 })))
+        .await
+        .err()
+        .unwrap();
+    assert!(format!("{error:#}").contains("`max_batch: 1`"), "{error:#}");
+
+    let error = OnnxFactory
+        .create_publisher(
+            "onnx",
+            &json!({ "task": "tensor", "model": STATEFUL, "max_batch": 1 }),
+        )
+        .await
+        .err()
+        .unwrap();
+    assert!(format!("{error:#}").contains("3 inputs"), "{error:#}");
+
+    let error = OnnxFactory
+        .create_publisher("onnx", &stateful_task(json!({ "vector": "output" })))
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        format!("{error:#}").contains("`vector` needs batched inputs"),
+        "{error:#}"
+    );
+}
+
+#[tokio::test]
+async fn inputs_name_every_model_input() {
+    let mut task = stateful_task(json!({}));
+    task["inputs"].as_object_mut().unwrap().remove("sr");
+    let error = OnnxFactory
+        .create_publisher("onnx", &task)
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        format!("{error:#}").contains("'sr' is missing"),
+        "{error:#}"
+    );
+}
+
+#[tokio::test]
+async fn a_constant_with_a_dynamic_batch_needs_one_message_per_call() {
+    let task = json!({
+        "task": "tensor",
+        "model": STATEFUL,
+        "max_batch": 4,
+        "inputs": { "input": { "value": [[1, 2]] }, "state": {}, "sr": { "value": 10 } },
+    });
+    let error = OnnxFactory
+        .create_publisher("onnx", &task)
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        format!("{error:#}").contains("dynamic first dimension"),
+        "{error:#}"
+    );
+}
+
+#[tokio::test]
+async fn one_named_tensor_feeds_the_only_input() {
+    let publisher = decoding(
+        json!({ "decode": "json" }),
+        json!({ "task": "tensor", "model": TENSOR, "outputs": ["y"] }),
+    )
+    .await;
+    let message = CanonicalMessage::from(json!({ "anything": [1, 2] }).to_string());
+    let answers = answers(publisher.as_ref(), vec![message]).await;
+    close(&answers[0].as_ref().unwrap()["y"], &[9.0, 12.0, 15.0]);
+}
+
+#[cfg(feature = "audio")]
+#[tokio::test]
+async fn a_wav_file_becomes_the_sample_tensor() {
+    let spec = hound::WavSpec {
+        channels: 2,
+        sample_rate: 16000,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut file = std::io::Cursor::new(Vec::new());
+    let mut writer = hound::WavWriter::new(&mut file, spec).unwrap();
+    [16384i16, 16384, -16384, -16384]
+        .iter()
+        .for_each(|s| writer.write_sample(*s).unwrap());
+    writer.finalize().unwrap();
+
+    let publisher = decoding(
+        json!({ "decode": "wav" }),
+        json!({ "task": "tensor", "model": TENSOR, "outputs": ["y"] }),
+    )
+    .await;
+    let answers = answers(
+        publisher.as_ref(),
+        vec![CanonicalMessage::from(file.into_inner())],
+    )
+    .await;
+    close(&answers[0].as_ref().unwrap()["y"], &[-1.5, -1.5, -1.5]);
 }
 
 #[tokio::test]

@@ -15,7 +15,8 @@
 //!   an image embedding.
 //!
 //! The `onnx` middleware makes those tensors: it decodes a PNG or JPEG image, a
-//! JSON array or a `.npy` file, optionally from base64, into the payload, with the
+//! JSON array (or an object of named arrays), a `.npy` file or, with feature
+//! `audio`, PCM or WAV audio, optionally from base64, into the payload, with the
 //! element type and shape in the metadata.
 //!
 //! ONNX Runtime is linked statically, so nothing has to be installed. The same
@@ -27,6 +28,8 @@
 //! * from Python or Node.js, whose `mq-bridge-onnx` packages ship that same
 //!   library and call the host's generic loader.
 
+#[cfg(feature = "audio")]
+mod audio;
 mod config;
 mod decode;
 mod embeddings;
@@ -47,10 +50,10 @@ use ort::value::{DynValue, Tensor, TensorElementType};
 use serde_json::Value;
 
 use config::TaskConfig;
-pub use config::{OnnxConfig, OnnxDevice, OnnxPooling, OnnxTask};
-pub use decode::{OnnxDecode, OnnxDecodeConfig, OnnxMiddlewareFactory};
+pub use config::{OnnxConfig, OnnxDevice, OnnxInput, OnnxPooling, OnnxTask};
+pub use decode::{OnnxDecode, OnnxDecodeConfig, OnnxMiddlewareFactory, OnnxPcmFormat};
 pub use preprocess::OnnxExtent;
-pub use tensor_data::{DTYPE_KEY, ERROR_KEY, OnnxDtype, SHAPE_KEY};
+pub use tensor_data::{DTYPE_KEY, ERROR_KEY, NAMES_KEY, OnnxDtype, SHAPE_KEY};
 
 /// The endpoint and middleware name, which is also the plugin's discovery name.
 pub const NAME: &str = "onnx";

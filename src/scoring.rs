@@ -275,20 +275,22 @@ fn run_batch(model: &OnnxModel, plan: &Plan, values: Vec<f64>) -> anyhow::Result
         let outputs = session
             .run(vec![(plan.input.as_str(), tensor)])
             .map_err(|e| anyhow!("{e}"))?;
-        objects_of(&outputs, &plan.outputs, rows)
+        objects_of(&outputs, &plan.outputs, rows, false)
     })
 }
 
-/// One JSON object of the `names` outputs per row.
+/// One JSON object of the `names` outputs per row; `whole` answers each output
+/// whole, for one row whose outputs need not have a batch dimension.
 pub(crate) fn objects_of(
     outputs: &SessionOutputs<'_>,
     names: &[String],
     rows: usize,
+    whole: bool,
 ) -> anyhow::Result<Vec<Value>> {
     let mut objects: Vec<Map<String, Value>> = (0..rows).map(|_| Map::new()).collect();
     for name in names {
-        let per_row =
-            rows_of(&outputs[name.as_str()], rows).with_context(|| format!("output '{name}'"))?;
+        let per_row = rows_of(&outputs[name.as_str()], rows, whole)
+            .with_context(|| format!("output '{name}'"))?;
         for (object, value) in objects.iter_mut().zip(per_row) {
             object.insert(name.clone(), value);
         }
@@ -298,7 +300,7 @@ pub(crate) fn objects_of(
 
 /// Splits an output into one JSON value per row: a number, a list, a string,
 /// or an object of class to probability for a classifier's map output.
-fn rows_of(value: &DynValue, rows: usize) -> anyhow::Result<Vec<Value>> {
+fn rows_of(value: &DynValue, rows: usize, whole: bool) -> anyhow::Result<Vec<Value>> {
     let failed = |e: ort::Error| anyhow!("{e}");
     match value.dtype() {
         ValueType::Tensor { ty, .. } => {
@@ -327,6 +329,10 @@ fn rows_of(value: &DynValue, rows: usize) -> anyhow::Result<Vec<Value>> {
                 }
                 other => bail!("{other} tensors are not supported"),
             };
+            if whole {
+                let dims: Vec<usize> = shape.iter().map(|d| *d as usize).collect();
+                return Ok(vec![nest(&mut cells.into_iter(), &dims)]);
+            }
             split_rows(&shape, cells, rows)
         }
         ValueType::Sequence(_) => {
