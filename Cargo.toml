@@ -20,8 +20,8 @@ async-trait = "0.1"
 base64 = "0.23"
 # Feature `audio`: hound reads WAV files, rubato resamples; ~0.5 MB of the plugin.
 hound = { version = "3.5", optional = true }
-# Only the decoders the `onnx` middleware reads; resizing is built in.
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# Feature `image`: only the decoders the `onnx` middleware reads; resizing is built in.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"], optional = true }
 mq-bridge = { version = "1.0.1", default-features = false }
 # ort has no stable 2.0 and its rc releases break the API, hence the exact pin.
 # `download-binaries` links a prebuilt static ONNX Runtime (sha256-checked, from
@@ -50,7 +50,9 @@ tokio = { version = "1.34", features = ["rt-multi-thread", "macros"] }
 # load. Turn it off (`default-features = false`) when linking this crate
 # directly alongside another plugin, since both would define the same
 # `mq_bridge_plugin_v1` symbol.
-default = ["plugin", "audio"]
+default = ["plugin", "image", "audio"]
 plugin = ["mq-bridge/plugin-sdk"]
+# decode `image` (PNG, JPEG) in the `onnx` middleware.
+image = ["dep:image"]
 # decode `pcm` and `wav` in the `onnx` middleware.
 audio = ["dep:hound", "dep:rubato"]

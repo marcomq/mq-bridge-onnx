@@ -14,9 +14,9 @@
 //! * `tensor`: a tensor per message to the model's outputs or to one vector, e.g.
 //!   an image embedding.
 //!
-//! The `onnx` middleware makes those tensors: it decodes a PNG or JPEG image, a
-//! JSON array (or an object of named arrays), a `.npy` file or, with feature
-//! `audio`, PCM or WAV audio, optionally from base64, into the payload, with the
+//! The `onnx` middleware makes those tensors: it decodes, with feature `image`, a
+//! PNG or JPEG image, a JSON array (or an object of named arrays), a `.npy` file
+//! or, with feature `audio`, PCM or WAV audio, optionally from base64, into the payload, with the
 //! element type and shape in the metadata.
 //!
 //! ONNX Runtime is linked statically, so nothing has to be installed. The same
@@ -33,6 +33,7 @@ mod audio;
 mod config;
 mod decode;
 mod embeddings;
+#[cfg(feature = "image")]
 mod preprocess;
 mod runtime;
 mod scoring;
@@ -51,8 +52,10 @@ use serde_json::Value;
 
 use config::TaskConfig;
 pub use config::{OnnxConfig, OnnxDevice, OnnxInput, OnnxPooling, OnnxTask};
-pub use decode::{OnnxDecode, OnnxDecodeConfig, OnnxMiddlewareFactory, OnnxPcmFormat};
-pub use preprocess::OnnxExtent;
+pub use decode::{
+    OnnxDecode, OnnxDecodeConfig, OnnxExtent, OnnxMiddlewareFactory, OnnxPcmFormat,
+};
+pub use runtime::environment;
 pub use tensor_data::{DTYPE_KEY, ERROR_KEY, NAMES_KEY, OnnxDtype, SHAPE_KEY};
 
 /// The endpoint and middleware name, which is also the plugin's discovery name.

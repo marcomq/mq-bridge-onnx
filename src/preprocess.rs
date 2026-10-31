@@ -9,20 +9,11 @@
 
 use anyhow::{Context, anyhow, bail};
 use image::imageops::{self, FilterType};
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 
+use crate::decode::OnnxExtent;
 use crate::tensor_data::TensorData;
-
-/// A size: one number is the shortest edge (resize) or a square (crop),
-/// two are `[height, width]`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(untagged)]
-pub enum OnnxExtent {
-    Edge(u32),
-    Exact([u32; 2]),
-}
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct Preprocessing {

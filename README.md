@@ -209,7 +209,8 @@ Middleware fields:
 | `sample_rate` | none | pcm: rate in Hz, needed by `resample_to` |
 | `resample_to` | none | pcm, wav: resample to this rate in Hz, e.g. `16000` |
 
-An image becomes a `[3, height, width]` float32 tensor (channels first, RGB).
+An image becomes a `[3, height, width]` float32 tensor (channels first, RGB);
+`image` needs the cargo feature `image`, which is on by default.
 Audio becomes a mono `[samples]` float32 tensor in -1..1; `pcm` and `wav` need
 the cargo feature `audio`, which is on by default and in the Python and npm packages.
 The payload is the tensor's raw little-endian elements; the metadata names them:
