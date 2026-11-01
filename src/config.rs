@@ -18,7 +18,8 @@ pub struct OnnxConfig {
     /// What the model answers with; the `embeddings` in `onnx+embeddings://`.
     #[schemars(extend("x-mqb-uri" = "subscheme"))]
     pub task: OnnxTask,
-    /// Path of the `.onnx` model file, e.g. `/models/all-MiniLM-L6-v2/model.onnx`.
+    /// Path of the `.onnx` model file, e.g. `/models/all-MiniLM-L6-v2/model.onnx`;
+    /// for transcribe, the model's folder.
     #[schemars(extend("x-mqb-uri" = "filepath"))]
     pub model: String,
     /// Embeddings: template of the text to embed, e.g. `${payload:body}`.
@@ -65,6 +66,8 @@ pub enum OnnxTask {
     Score,
     /// A tensor per message, as the `onnx` middleware decodes it, to the model's outputs.
     Tensor,
+    /// Speech, as WAV or decoded by the `onnx` middleware, to text with Parakeet TDT. Feature `asr`.
+    Transcribe,
 }
 
 /// Where a model input of task `tensor` comes from: a tensor of the message, or a constant.
@@ -142,10 +145,19 @@ pub(crate) struct TensorConfig {
     pub device: OnnxDevice,
 }
 
+#[cfg_attr(not(feature = "asr"), allow(dead_code))]
+#[derive(Debug, Clone)]
+pub(crate) struct TranscribeConfig {
+    pub model: String,
+    pub threads: Option<usize>,
+}
+
 pub(crate) enum TaskConfig {
     Embeddings(EmbeddingsConfig),
     Score(ScoreConfig),
     Tensor(TensorConfig),
+    #[cfg_attr(not(feature = "asr"), allow(dead_code))]
+    Transcribe(TranscribeConfig),
 }
 
 impl OnnxConfig {
@@ -176,6 +188,20 @@ impl OnnxConfig {
                 ("max_len", self.max_len.is_some()),
                 ("features", !self.features.is_empty()),
             ],
+            OnnxTask::Transcribe => &[
+                ("input", self.input.is_some()),
+                ("tokenizer", self.tokenizer.is_some()),
+                ("numbers", !self.numbers.is_empty()),
+                ("max_len", self.max_len.is_some()),
+                ("pooling", self.pooling.is_some()),
+                ("normalize", self.normalize.is_some()),
+                ("features", !self.features.is_empty()),
+                ("outputs", self.outputs.is_some()),
+                ("input_name", self.input_name.is_some()),
+                ("inputs", !self.inputs.is_empty()),
+                ("vector", self.vector.is_some()),
+                ("max_batch", self.max_batch.is_some()),
+            ],
         };
         if let Some((field, _)) = foreign.iter().find(|(_, set)| *set) {
             let task = serde_json::to_value(self.task)?;
@@ -198,6 +224,9 @@ impl OnnxConfig {
                     bail!("`inputs.{name}` is a constant `value`; `from` and `batch` do not apply");
                 }
             }
+        }
+        if self.task == OnnxTask::Transcribe && self.device != OnnxDevice::Cpu {
+            bail!("task \"transcribe\" runs on the CPU only");
         }
         Ok(match self.task {
             OnnxTask::Embeddings => {
@@ -237,6 +266,10 @@ impl OnnxConfig {
                 max_batch: self.max_batch,
                 threads: self.threads,
                 device: self.device,
+            }),
+            OnnxTask::Transcribe => TaskConfig::Transcribe(TranscribeConfig {
+                model: self.model,
+                threads: self.threads,
             }),
         })
     }
@@ -292,6 +325,20 @@ mod tests {
                 .unwrap_err()
                 .contains("not read by task \"tensor\"")
         );
+    }
+
+    #[test]
+    fn transcribe_reads_only_the_model_folder_and_threads() {
+        let config = json!({ "task": "transcribe", "model": "/models/parakeet", "threads": 4 });
+        assert!(matches!(task(config).unwrap(), TaskConfig::Transcribe(_)));
+        let error = task(json!({ "task": "transcribe", "model": "m", "max_batch": 2 }))
+            .err()
+            .unwrap();
+        assert_eq!(
+            error.to_string(),
+            "`max_batch` is not read by task \"transcribe\""
+        );
+        assert!(task(json!({ "task": "transcribe", "model": "m", "device": "auto" })).is_err());
     }
 
     #[test]

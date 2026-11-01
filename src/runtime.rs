@@ -21,7 +21,10 @@ pub(crate) const DEFAULT_THREADS: usize = 2;
 
 static ENVIRONMENT: OnceLock<Result<ort::environment::Environment, String>> = OnceLock::new();
 
-fn environment() -> anyhow::Result<&'static ort::environment::Environment> {
+/// The process's ONNX Runtime environment, started on first use. ort allows one
+/// per process, so a program that also opens sessions with ort itself passes
+/// this one to `Session::builder` instead of building its own.
+pub fn environment() -> anyhow::Result<&'static ort::environment::Environment> {
     let started = ENVIRONMENT.get_or_init(|| {
         ort::init()
             .with_name("mq-bridge")

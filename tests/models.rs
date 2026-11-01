@@ -5,6 +5,8 @@
 
 // Runs real models. The embedding test also needs MQB_ONNX_TEST_MODEL_DIR: a folder
 // with all-MiniLM-L6-v2's model.onnx and tokenizer.json; it skips itself without one.
+// The ignored transcribe test needs MQB_ONNX_TEST_PARAKEET_DIR (the
+// parakeet-tdt-0.6b-v3 int8 export) and MQB_ONNX_TEST_SPEECH_WAV (llm_pal's de_48k.wav).
 
 use mq_bridge::traits::{CustomEndpointFactory, MessagePublisher};
 use mq_bridge::{CanonicalMessage, SentBatch};
@@ -150,4 +152,33 @@ async fn minilm_vectors_match_sentence_transformers_pooling() {
             assert!((got - want).abs() < 1e-4, "{text}: {got} vs {want}");
         }
     }
+}
+
+#[cfg(feature = "asr")]
+#[tokio::test]
+#[ignore = "needs a Parakeet model folder and a German speech WAV"]
+async fn parakeet_transcribes_german_speech_at_48_khz() {
+    let dir = std::env::var("MQB_ONNX_TEST_PARAKEET_DIR").unwrap();
+    let wav = std::fs::read(std::env::var("MQB_ONNX_TEST_SPEECH_WAV").unwrap()).unwrap();
+    let publisher = OnnxFactory
+        .create_publisher("stt", &json!({ "task": "transcribe", "model": dir, "threads": 4 }))
+        .await
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    let (answers, failed) = responses(
+        publisher
+            .send_batch(vec![CanonicalMessage::new(wav, None)])
+            .await
+            .unwrap(),
+    );
+    eprintln!("{:?}: {}", started.elapsed(), answers[0]);
+
+    assert_eq!(failed, 0);
+    let text = answers[0]["text"].as_str().unwrap().to_lowercase();
+    for word in ["hallo", "teste", "zweite", "satz", "hörst", "mich"] {
+        assert!(text.contains(word), "{text:?} lacks {word:?}");
+    }
+    let words = answers[0]["words"].as_array().unwrap();
+    assert!(words[0]["start"].as_f64().unwrap() < words[1]["start"].as_f64().unwrap());
 }

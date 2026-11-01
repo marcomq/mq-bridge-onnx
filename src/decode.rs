@@ -21,8 +21,18 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::preprocess::{OnnxExtent, Preprocessing};
+#[cfg(feature = "image")]
+use crate::preprocess::Preprocessing;
 use crate::tensor_data::{ERROR_KEY, OnnxDtype, TensorData};
+
+/// A size: one number is the shortest edge (resize) or a square (crop),
+/// two are `[height, width]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum OnnxExtent {
+    Edge(u32),
+    Exact([u32; 2]),
+}
 
 /// The `onnx` middleware: decodes each message into a tensor for task `tensor`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -64,7 +74,7 @@ pub struct OnnxDecodeConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum OnnxDecode {
-    /// A PNG or JPEG image, to a `[3, height, width]` float32 tensor.
+    /// A PNG or JPEG image, to a `[3, height, width]` float32 tensor. Feature `image`.
     Image,
     /// A (nested) JSON array of numbers, to a tensor of its shape; an object of
     /// them, to one named tensor per field.
@@ -89,6 +99,7 @@ pub enum OnnxPcmFormat {
 }
 
 enum Kind {
+    #[cfg(feature = "image")]
     Image(Preprocessing),
     Json(OnnxDtype),
     Npy,
@@ -149,6 +160,7 @@ impl Decoder {
             bail!("`{field}` must be greater than 0");
         }
         let kind = match config.decode {
+            #[cfg(feature = "image")]
             OnnxDecode::Image => {
                 let mut settings = match &config.preprocessor {
                     Some(path) => Preprocessing::from_file(path)?,
@@ -160,6 +172,10 @@ impl Decoder {
                 settings.mean = config.mean.or(settings.mean);
                 settings.std = config.std.or(settings.std);
                 Kind::Image(settings)
+            }
+            #[cfg(not(feature = "image"))]
+            OnnxDecode::Image => {
+                bail!("decode {decode} needs mq-bridge-onnx built with feature `image`")
             }
             OnnxDecode::Json => Kind::Json(config.dtype.unwrap_or_default()),
             OnnxDecode::Npy => Kind::Npy,
@@ -217,8 +233,10 @@ impl Decoder {
         if self.base64 {
             input = Cow::Owned(from_base64(&input)?);
         }
-        let mut image_size = None;
+        #[cfg_attr(not(feature = "image"), allow(unused_mut))]
+        let mut image_size: Option<(u32, u32, String)> = None;
         let (tensor, audio_rate): (TensorData, Option<u32>) = match &self.kind {
+            #[cfg(feature = "image")]
             Kind::Image(settings) => {
                 let (tensor, width, height) = settings.run(&input)?;
                 image_size = Some((width, height, serde_json::to_string(settings)?));
@@ -525,6 +543,7 @@ mod tests {
         assert_eq!(message.payload.len(), 16);
     }
 
+    #[cfg(feature = "image")]
     #[test]
     fn a_message_that_does_not_decode_is_marked_and_kept() {
         let decoder = decoder(json!({ "decode": "image" })).unwrap();
@@ -627,5 +646,12 @@ mod tests {
     fn audio_needs_its_feature() {
         let error = decoder(json!({ "decode": "wav" })).err().unwrap();
         assert!(error.to_string().contains("feature `audio`"), "{error}");
+    }
+
+    #[cfg(not(feature = "image"))]
+    #[test]
+    fn image_needs_its_feature() {
+        let error = decoder(json!({ "decode": "image" })).err().unwrap();
+        assert!(error.to_string().contains("feature `image`"), "{error}");
     }
 }

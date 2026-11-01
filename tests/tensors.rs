@@ -7,7 +7,7 @@
 // make_tiny_tensor_models.py.
 
 use mq_bridge::traits::{CustomEndpointFactory, CustomMiddlewareFactory, MessagePublisher};
-use mq_bridge::{CanonicalMessage, SentBatch};
+use mq_bridge::CanonicalMessage;
 use mq_bridge_onnx::{ERROR_KEY, OnnxFactory, OnnxMiddlewareFactory};
 use serde_json::{Value, json};
 
@@ -15,6 +15,7 @@ const TENSOR: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/tiny_tensor.onnx"
 );
+#[cfg(feature = "image")]
 const IMAGE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/tiny_image.onnx"
@@ -45,6 +46,7 @@ async fn answers(
 }
 
 /// A 4×4 PNG with red 10·x, green 20·y and blue 30.
+#[cfg(feature = "image")]
 fn png() -> Vec<u8> {
     let image = image::RgbImage::from_fn(4, 4, |x, y| image::Rgb([x as u8 * 10, y as u8 * 20, 30]));
     let mut bytes = std::io::Cursor::new(Vec::new());
@@ -106,6 +108,7 @@ async fn json_tensors_get_every_output_and_bad_ones_fail_alone() {
     assert_eq!(last["label"], 0);
 }
 
+#[cfg(feature = "image")]
 #[tokio::test]
 async fn an_image_embedding_is_one_vector() {
     let channel_means = [15.0 / 255.0, 30.0 / 255.0, 30.0 / 255.0];
@@ -120,6 +123,7 @@ async fn an_image_embedding_is_one_vector() {
     }
 }
 
+#[cfg(feature = "image")]
 #[tokio::test]
 async fn a_base64_image_is_normalised_and_bad_base64_fails_alone() {
     let publisher = decoding(
@@ -133,6 +137,7 @@ async fn a_base64_image_is_normalised_and_bad_base64_fails_alone() {
         CanonicalMessage::from(encoded),
         CanonicalMessage::from("not base64!"),
     ];
+    use mq_bridge::SentBatch;
     let SentBatch::Partial { responses, failed } = publisher.send_batch(messages).await.unwrap()
     else {
         panic!("expected answers");
