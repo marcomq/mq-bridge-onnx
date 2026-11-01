@@ -11,6 +11,7 @@ the same name that turns images and arrays into tensors for it. The endpoint's
 | `embeddings` | a text template, plus optional numbers | a JSON array of floats, like `openai_embeddings` |
 | `score` | numeric feature templates | a JSON object of the model's outputs |
 | `tensor` | a tensor per message, from the `onnx` middleware | the model's outputs, or one vector such as an image embedding |
+| `transcribe` | speech as WAV, or audio from the `onnx` middleware | `{"text": ..., "words": [...]}` |
 
 `score` runs CatBoost, XGBoost and LightGBM exports and other ONNX models with one
 numeric input. ONNX Runtime is linked into the library, so nothing else has to
@@ -281,6 +282,43 @@ with a dynamic first dimension also needs `max_batch: 1`. A message with one
 unnamed tensor feeds the only input that takes one, whatever that input's name;
 a named tensor is matched by the input's `from`, which defaults to the input's name.
 
+## Speech to text
+
+Task `transcribe` turns speech into text with
+[Parakeet TDT](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx)
+(25 European languages, detected by itself). `model` is the model's folder, with
+`encoder-model.onnx`, `decoder_joint-model.onnx` (or their `.int8.` exports) and
+`vocab.txt`. WAV files from S3 to Kafka:
+
+```yaml
+output:
+  custom:
+    name: onnx
+    config:
+      task: transcribe
+      model: "/models/parakeet-tdt-0.6b-v3"
+```
+
+A payload is read as a WAV file. For raw PCM, a JSON field or base64, decode
+the audio with the `onnx` middleware first (`decode: pcm` needs `sample_rate`).
+Any rate is resampled to 16 kHz. The answer is
+
+```json
+{"text": "Hallo, ich teste.", "words": [{"text": "Hallo", "start": 0.0, "end": 0.4}, ...]}
+```
+
+with times in seconds; punctuation marks are words of their own. Audio shorter
+than 0.1 s answers empty text; audio longer than 10 minutes fails its message,
+since the encoder's memory grows fast with length. The model runs
+on one thread of its own, one message after another, on the CPU; `threads`
+(default `2`) is all it reads besides `model`. It suits finished segments of up
+to a few minutes, not streaming. It needs the cargo feature `asr`, which is on
+by default and in the Python and npm packages: it adds `parakeet-rs`, `ndarray`,
+`realfft` and tokenizers' `onig` (built from C), about 1 MB of plugin. Rust
+programs that do not transcribe can leave it out with `default-features = false`.
+On an Apple M1 with 4 threads the int8 export transcribes 10 s of speech in
+0.56 s, at a peak of about 840 MB.
+
 ## URIs
 
 ```sh
@@ -321,6 +359,11 @@ and `tokenizer.json`; it skips that test otherwise. `tests/fixtures/tiny_classif
 is a 20 KB CatBoost model made by `tests/fixtures/make_tiny_classifier.py`;
 `tiny_tensor.onnx` and `tiny_image.onnx` are hand-built models of a few hundred
 bytes, made by `tests/fixtures/make_tiny_tensor_models.py`.
+The ignored transcribe test runs with
+`cargo test --release --test models -- --ignored` when
+`MQB_ONNX_TEST_PARAKEET_DIR` names the Parakeet folder and `MQB_ONNX_TEST_SPEECH_WAV`
+a WAV of German speech saying "Hallo, ich teste … zweite Satz … Hörst du mich jetzt?"
+(llm_pal's `testdata/de_48k.wav`).
 
 The build downloads a prebuilt ONNX Runtime from pyke's CDN (checked by sha256).
 Set `ORT_LIB_LOCATION` to a local ONNX Runtime build to build offline.

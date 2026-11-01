@@ -4,7 +4,7 @@ version = "0.1.2"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
-description = "Local ONNX inference endpoints for mq-bridge: text embeddings, tabular model scoring and image or tensor models"
+description = "Local ONNX inference endpoints for mq-bridge: text embeddings, tabular model scoring, image or tensor models and speech to text"
 repository = "https://github.com/marcomq/mq-bridge-onnx"
 include = ["/src/**", "/tests/**", "/Cargo.toml", "/README.md", "/LICENSE-MIT", "/LICENSE-APACHE"]
 
@@ -29,6 +29,8 @@ mq-bridge = { version = "1.0.1", default-features = false }
 # musl or Intel macOS. `api-22` is the oldest runtime API the code uses.
 # Bumping ort can change the ONNX Runtime version: rerun scripts/third_party_notices.sh.
 ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "download-binaries", "tls-rustls", "api-22"] }
+# Feature `asr`: Parakeet TDT speech recognition; adds tokenizers' onig (C), realfft and ndarray.
+parakeet-rs = { version = "0.4.3", default-features = false, features = ["cpu"], optional = true }
 rubato = { version = "5", optional = true }
 # Derives the configuration schema from the config structs, so the two cannot drift.
 schemars = "1.2"
@@ -50,9 +52,11 @@ tokio = { version = "1.34", features = ["rt-multi-thread", "macros"] }
 # load. Turn it off (`default-features = false`) when linking this crate
 # directly alongside another plugin, since both would define the same
 # `mq_bridge_plugin_v1` symbol.
-default = ["plugin", "image", "audio"]
+default = ["plugin", "image", "audio", "asr"]
 plugin = ["mq-bridge/plugin-sdk"]
 # decode `image` (PNG, JPEG) in the `onnx` middleware.
 image = ["dep:image"]
 # decode `pcm` and `wav` in the `onnx` middleware.
 audio = ["dep:hound", "dep:rubato"]
+# task `transcribe`: speech to text with Parakeet TDT.
+asr = ["audio", "dep:parakeet-rs", "tokio/sync"]

@@ -12,7 +12,8 @@
 //! * `score`: numeric features to the model's outputs, e.g. a CatBoost, XGBoost or
 //!   LightGBM export;
 //! * `tensor`: a tensor per message to the model's outputs or to one vector, e.g.
-//!   an image embedding.
+//!   an image embedding;
+//! * `transcribe`, with feature `asr`: speech to text with Parakeet TDT.
 //!
 //! The `onnx` middleware makes those tensors: it decodes, with feature `image`, a
 //! PNG or JPEG image, a JSON array (or an object of named arrays), a `.npy` file
@@ -39,6 +40,8 @@ mod runtime;
 mod scoring;
 mod tensor;
 mod tensor_data;
+#[cfg(feature = "asr")]
+mod transcribe;
 
 use std::sync::Arc;
 
@@ -105,6 +108,17 @@ impl CustomEndpointFactory for OnnxFactory {
             }
             TaskConfig::Score(config) => Box::new(scoring::OnnxPublisher::new(config).await?),
             TaskConfig::Tensor(config) => Box::new(tensor::OnnxTensorPublisher::new(config).await?),
+            #[cfg(feature = "asr")]
+            TaskConfig::Transcribe(config) => {
+                Box::new(transcribe::OnnxTranscribePublisher::new(config).await?)
+            }
+            #[cfg(not(feature = "asr"))]
+            TaskConfig::Transcribe(_) => {
+                return Err(InvalidConfig(anyhow!(
+                    "onnx: task \"transcribe\" needs mq-bridge-onnx built with feature `asr`"
+                ))
+                .into());
+            }
         })
     }
 }
