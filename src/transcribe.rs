@@ -58,6 +58,9 @@ impl OnnxTranscribePublisher {
                 let _ = ready.send(Ok(()));
                 // Ends once the publisher, and with it the sender, is dropped.
                 for (messages, reply) in inbox {
+                    if reply.is_closed() {
+                        continue;
+                    }
                     let answers = messages
                         .iter()
                         .map(|m| {

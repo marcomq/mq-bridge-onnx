@@ -287,8 +287,9 @@ a named tensor is matched by the input's `from`, which defaults to the input's n
 Task `transcribe` turns speech into text with
 [Parakeet TDT](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx)
 (25 European languages, detected by itself). `model` is the model's folder, with
-`encoder-model.onnx`, `decoder_joint-model.onnx` (or their `.int8.` exports) and
-`vocab.txt`. WAV files from S3 to Kafka:
+`encoder-model.onnx` and its weights `encoder-model.onnx.data`,
+`decoder_joint-model.onnx` (or their `.int8.` exports, which need no `.data`)
+and `vocab.txt`. WAV files from S3 to Kafka:
 
 ```yaml
 output:
