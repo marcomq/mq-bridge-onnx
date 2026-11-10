@@ -13,8 +13,9 @@ the same name that turns images and arrays into tensors for it. The endpoint's
 | `tensor` | a tensor per message, from the `onnx` middleware | the model's outputs, or one vector such as an image embedding |
 | `transcribe` | speech as WAV, or audio from the `onnx` middleware | `{"text": ..., "words": [...]}` |
 
-`score` runs CatBoost, XGBoost and LightGBM exports and other ONNX models with one
-numeric input. ONNX Runtime is linked into the library, so nothing else has to
+`score` evaluates a model on one row of numbers per message and returns what
+the model computes for it: a class, probabilities, a value or any other output.
+It works with any ONNX model that has one numeric input. ONNX Runtime is linked into the library, so nothing else has to
 be installed. Nothing is trained here: bring your own model files.
 
 ## Install
@@ -139,7 +140,7 @@ middlewares:
       into: churn
 ```
 
-The answer for a CatBoost classifier is `{"label": 1, "probabilities": {"0": 0.017, "1": 0.983}}`.
+The answer for a classifier is `{"label": 1, "probabilities": {"0": 0.017, "1": 0.983}}`.
 
 | Field | Default | Meaning |
 | --- | --- | --- |
@@ -160,8 +161,8 @@ The answer for a CatBoost classifier is `{"label": 1, "probabilities": {"0": 0.0
 - An output of shape `[rows]` or `[rows, 1]` becomes a number per message, a
   wider one an array. A classifier's probability map (ONNX `ZipMap`) becomes an
   object keyed by class label, in label order.
-- CatBoost exports only numeric features to ONNX; encode categorical ones as
-  numbers before training.
+- Features are numbers only; encode categorical values as numbers before
+  training.
 
 ## Tensors and images
 
@@ -357,7 +358,7 @@ cargo test
 `tests/models.rs` also checks MiniLM against reference vectors when
 `MQB_ONNX_TEST_MODEL_DIR` names a folder with all-MiniLM-L6-v2's `model.onnx`
 and `tokenizer.json`; it skips that test otherwise. `tests/fixtures/tiny_classifier.onnx`
-is a 20 KB CatBoost model made by `tests/fixtures/make_tiny_classifier.py`;
+is a 20 KB classifier made by `tests/fixtures/make_tiny_classifier.py`;
 `tiny_tensor.onnx` and `tiny_image.onnx` are hand-built models of a few hundred
 bytes, made by `tests/fixtures/make_tiny_tensor_models.py`.
 The ignored transcribe test runs with
